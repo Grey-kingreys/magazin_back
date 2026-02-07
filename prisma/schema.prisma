@@ -1,0 +1,365 @@
+
+generator client {
+  provider = "prisma-client"
+  output   = "../generated/prisma"
+  previewFeatures = ["driverAdapters"]
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ==================== ENUMS ====================
+
+enum Role {
+  ADMIN
+  MANAGER
+  STORE_MANAGER
+  CASHIER
+  USER
+}
+
+enum PaymentMethod {
+  CASH
+  CARD
+  MOBILE_MONEY
+  CHECK
+}
+
+enum MovementType {
+  IN
+  OUT
+  TRANSFER
+  ADJUSTMENT
+}
+
+enum TransactionType {
+  SALE
+  PURCHASE
+  EXPENSE
+  REVENUE
+}
+
+enum SaleStatus {
+  PENDING
+  COMPLETED
+  CANCELLED
+  REFUNDED
+}
+
+enum CashRegisterStatus {
+  OPEN
+  CLOSED
+}
+
+// ==================== USER & AUTH ====================
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  name         String
+  password     String
+  role         Role     @default(USER)
+  storeId      String?  // Magasin assigné (pour STORE_MANAGER et CASHIER)
+  isActive     Boolean  @default(true)
+  
+  // Champs pour la réinitialisation de mot de passe
+  resetPasswordToken   String?   @unique
+  resetPasswordExpires DateTime?
+  
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  // Relations
+  store          Store?          @relation(fields: [storeId], references: [id])
+  sales          Sale[]
+  cashRegisters  CashRegister[]
+  stockMovements StockMovement[]
+  expenses       Expense[]
+  revenues       Revenue[]
+
+  @@index([email])
+  @@index([storeId])
+  @@index([resetPasswordToken])
+}
+
+
+// ==================== CATEGORIES ====================
+
+model Category {
+  id          String    @id @default(cuid())
+  name        String
+  description String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  // Relations
+  products Product[]
+
+  @@index([name])
+}
+
+// ==================== SUPPLIERS ====================
+
+model Supplier {
+  id          String    @id @default(cuid())
+  name        String
+  email       String?
+  phone       String?
+  address     String?
+  city        String?
+  country     String?
+  taxId       String?   // Numéro fiscal
+  isActive    Boolean   @default(true)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  // Relations
+  products Product[]
+
+  @@index([name])
+}
+
+// ==================== PRODUCTS ====================
+
+model Product {
+  id          String   @id @default(cuid())
+  name        String
+  description String?
+  barcode     String?  @unique
+  sku         String   @unique // Stock Keeping Unit
+  categoryId  String
+  supplierId  String?
+  
+  // Prix
+  costPrice   Float    // Prix d'achat
+  sellingPrice Float   // Prix de vente
+  
+  // Stock
+  minStock    Int      @default(0) // Seuil d'alerte
+  unit        String   @default("pièce") // unité (pièce, kg, litre, etc.)
+  
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  // Relations
+  category       Category        @relation(fields: [categoryId], references: [id])
+  supplier       Supplier?       @relation(fields: [supplierId], references: [id])
+  stocks         Stock[]
+  saleItems      SaleItem[]
+  stockMovements StockMovement[]
+
+  @@index([barcode])
+  @@index([sku])
+  @@index([categoryId])
+  @@index([supplierId])
+}
+
+// ==================== STORES ====================
+
+model Store {
+  id        String   @id @default(cuid())
+  name      String
+  address   String?
+  city      String?
+  phone     String?
+  email     String?
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  users          User[]
+  stocks         Stock[]
+  sales          Sale[]
+  cashRegisters  CashRegister[]
+  stockMovements StockMovement[]
+  expenses       Expense[]
+
+  @@index([name])
+}
+
+// ==================== STOCK ====================
+
+model Stock {
+  id        String   @id @default(cuid())
+  productId String
+  storeId   String
+  quantity  Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+  store   Store   @relation(fields: [storeId], references: [id], onDelete: Cascade)
+
+  @@unique([productId, storeId]) // Un produit ne peut avoir qu'un seul stock par magasin
+  @@index([productId])
+  @@index([storeId])
+}
+
+// ==================== STOCK MOVEMENTS ====================
+
+model StockMovement {
+  id           String       @id @default(cuid())
+  productId    String
+  storeId      String
+  userId       String
+  type         MovementType
+  quantity     Int
+  reference    String?      // Numéro de bon de livraison, facture, etc.
+  notes        String?
+  
+  // Pour les transferts
+  fromStoreId  String?
+  toStoreId    String?
+  
+  createdAt    DateTime     @default(now())
+
+  // Relations
+  product   Product @relation(fields: [productId], references: [id])
+  store     Store   @relation(fields: [storeId], references: [id])
+  user      User    @relation(fields: [userId], references: [id])
+
+  @@index([productId])
+  @@index([storeId])
+  @@index([userId])
+  @@index([type])
+  @@index([createdAt])
+}
+
+// ==================== SALES (POS) ====================
+
+model Sale {
+  id              String      @id @default(cuid())
+  saleNumber      String      @unique // Numéro de vente auto-généré
+  storeId         String
+  userId          String      // Vendeur/Caissier
+  cashRegisterId  String?
+  
+  subtotal        Float
+  discount        Float       @default(0)
+  tax             Float       @default(0)
+  total           Float
+  
+  paymentMethod   PaymentMethod
+  amountPaid      Float
+  change          Float       @default(0)
+  
+  status          SaleStatus  @default(COMPLETED)
+  notes           String?
+  
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+
+  // Relations
+  store        Store         @relation(fields: [storeId], references: [id])
+  user         User          @relation(fields: [userId], references: [id])
+  cashRegister CashRegister? @relation(fields: [cashRegisterId], references: [id])
+  items        SaleItem[]
+
+  @@index([saleNumber])
+  @@index([storeId])
+  @@index([userId])
+  @@index([status])
+  @@index([createdAt])
+}
+
+model SaleItem {
+  id        String   @id @default(cuid())
+  saleId    String
+  productId String
+  
+  quantity  Int
+  unitPrice Float
+  subtotal  Float
+  
+  createdAt DateTime @default(now())
+
+  // Relations
+  sale    Sale    @relation(fields: [saleId], references: [id], onDelete: Cascade)
+  product Product @relation(fields: [productId], references: [id])
+
+  @@index([saleId])
+  @@index([productId])
+}
+
+// ==================== CASH REGISTER ====================
+
+model CashRegister {
+  id            String             @id @default(cuid())
+  storeId       String
+  userId        String
+  
+  openingAmount Float
+  closingAmount Float?
+  expectedAmount Float?            // Montant théorique
+  difference    Float?             // Écart
+  
+  status        CashRegisterStatus @default(OPEN)
+  notes         String?
+  
+  openedAt      DateTime           @default(now())
+  closedAt      DateTime?
+
+  // Relations
+  store Store  @relation(fields: [storeId], references: [id])
+  user  User   @relation(fields: [userId], references: [id])
+  sales Sale[]
+
+  @@index([storeId])
+  @@index([userId])
+  @@index([status])
+  @@index([openedAt])
+}
+
+// ==================== EXPENSES ====================
+
+model Expense {
+  id          String   @id @default(cuid())
+  storeId     String
+  userId      String
+  
+  category    String   // Loyer, Salaires, Électricité, etc.
+  description String
+  amount      Float
+  reference   String?  // Numéro de facture
+  paymentMethod PaymentMethod?
+  
+  date        DateTime @default(now())
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  // Relations
+  store Store @relation(fields: [storeId], references: [id])
+  user  User  @relation(fields: [userId], references: [id])
+
+  @@index([storeId])
+  @@index([userId])
+  @@index([category])
+  @@index([date])
+}
+
+// ==================== REVENUES ====================
+
+model Revenue {
+  id          String   @id @default(cuid())
+  userId      String
+  
+  category    String   // Vente, Autre revenu, etc.
+  description String
+  amount      Float
+  reference   String?
+  
+  date        DateTime @default(now())
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  // Relations
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+  @@index([category])
+  @@index([date])
+}

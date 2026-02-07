@@ -1,0 +1,14 @@
+# backend/render.yaml
+services:
+  - type: web
+    name: countries-weather-api
+    env: node
+    buildCommand: npm install && npm run build
+    startCommand: npm run start:prod
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 3000
+      - key: WEATHER_API_KEY
+        sync: false  # À configurer manuellement sur Render

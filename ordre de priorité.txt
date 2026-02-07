@@ -1,0 +1,31 @@
+📋 Ordre de priorité global :
+Phase 1 - Fondations 🔥
+
+Catégories
+Fournisseurs
+Magasins
+Produits
+
+note: Phase 1 terminée et fonctionnelle
+
+Phase 2 - Stocks ⚡
+
+Module Stock
+Mouvements de Stock
+
+note: Phase 2 terminée
+
+Phase 3 - Ventes 💼
+
+Ventes/POS
+Caisse
+
+Phase 4 - Comptabilité 💰
+
+Dépenses
+Recettes
+Dashboard
+
+Phase 5 - Rapports 📊
+
+Rapports & Exports
