@@ -6,37 +6,74 @@ import {
 import { PrismaService } from 'src/common/services/prisma.service';
 import { CreateRevenueDto } from './dto/create-revenue.dto';
 import { UpdateRevenueDto } from './dto/update-revenue.dto';
+import { StoreFinanceService } from 'src/common/services/store-finance.service';
 
 @Injectable()
 export class RevenueService {
-  constructor(private readonly prisma: PrismaService) { }
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly storeFinance: StoreFinanceService,  // ⭐ INJECTER
+  ) { }
 
-  /**
-   * Créer une nouvelle recette
-   */
   async create(createRevenueDto: CreateRevenueDto, userId: string) {
     try {
-      const { category, description, amount, reference, date } = createRevenueDto;
+      const { storeId, category, description, amount, reference, date } = createRevenueDto;
 
-      // Créer la recette
-      const revenue = await this.prisma.revenue.create({
-        data: {
-          userId,
-          category: category.trim(),
-          description: description.trim(),
-          amount,
-          reference: reference?.trim() || null,
-          date: date || new Date(),
-        },
-        include: {
-          user: {
-            select: {
-              id: true,
-              name: true,
-              email: true,
+      // ⭐ NOUVEAU : Vérifier que le magasin existe
+      const store = await this.prisma.store.findUnique({
+        where: { id: storeId },
+      });
+
+      if (!store) {
+        throw new NotFoundException(`Magasin avec l'ID "${storeId}" non trouvé`);
+      }
+
+      if (!store.isActive) {
+        throw new BadRequestException(`Le magasin "${store.name}" est désactivé`);
+      }
+
+      // Créer la recette ET créditer le magasin dans une transaction
+      const revenue = await this.prisma.$transaction(async (tx) => {
+        // 1. Créer la recette
+        const newRevenue = await tx.revenue.create({
+          data: {
+            userId,
+            storeId,  // ⭐ NOUVEAU
+            category: category.trim(),
+            description: description.trim(),
+            amount,
+            reference: reference?.trim() || null,
+            date: date || new Date(),
+          },
+          include: {
+            user: {
+              select: {
+                id: true,
+                name: true,
+                email: true,
+              },
+            },
+            store: {  // ⭐ NOUVEAU
+              select: {
+                id: true,
+                name: true,
+                city: true,
+              },
             },
           },
-        },
+        });
+
+        // 2. Créditer le magasin
+        await this.storeFinance.creditStore(
+          storeId,
+          userId,
+          amount,
+          'REVENUE',
+          `Recette: ${category} - ${description}`,
+          newRevenue.id,
+        );
+
+        return newRevenue;
       });
 
       return {
@@ -51,6 +88,7 @@ export class RevenueService {
       );
     }
   }
+
 
   /**
    * Récupérer toutes les recettes avec pagination et filtres

@@ -10,6 +10,16 @@ import { ApiProperty } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 
 export class CreateRevenueDto {
+    // ⭐ NOUVEAU : Ajouter storeId
+    @ApiProperty({
+        example: 'clx7b8k9l0000xtqp5678efgh',
+        description: 'ID du magasin',
+        required: true,
+    })
+    @IsNotEmpty({ message: 'Le magasin est obligatoire' })
+    @IsString({ message: "L'ID du magasin doit être une chaîne de caractères" })
+    storeId: string;
+
     @ApiProperty({
         example: 'Vente',
         description: 'Catégorie de recette (Vente, Subvention, Donation, Autre revenu, etc.)',

@@ -52,6 +52,11 @@ enum CashRegisterStatus {
   CLOSED
 }
 
+enum StoreTransactionType {
+  IN   // Crédit
+  OUT  // Débit
+}
+
 // ==================== USER & AUTH ====================
 
 model User {
@@ -60,10 +65,9 @@ model User {
   name         String
   password     String
   role         Role     @default(USER)
-  storeId      String?  // Magasin assigné (pour STORE_MANAGER et CASHIER)
+  storeId      String?
   isActive     Boolean  @default(true)
   
-  // Champs pour la réinitialisation de mot de passe
   resetPasswordToken   String?   @unique
   resetPasswordExpires DateTime?
   
@@ -77,6 +81,7 @@ model User {
   stockMovements StockMovement[]
   expenses       Expense[]
   revenues       Revenue[]
+  storeTransactions StoreTransaction[]
 
   @@index([email])
   @@index([storeId])
@@ -165,6 +170,10 @@ model Store {
   city      String?
   phone     String?
   email     String?
+  
+  // ⭐ Suivi financier
+  balance   Float    @default(0)
+  
   isActive  Boolean  @default(true)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -176,8 +185,39 @@ model Store {
   cashRegisters  CashRegister[]
   stockMovements StockMovement[]
   expenses       Expense[]
+  revenues       Revenue[]              // ⭐ AJOUTER CETTE LIGNE
+  storeTransactions StoreTransaction[]  // ⭐ AJOUTER CETTE LIGNE
 
   @@index([name])
+}
+
+// ⭐ NOUVEAU : Table pour tracker tous les mouvements d'argent
+model StoreTransaction {
+  id          String   @id @default(cuid())
+  storeId     String
+  userId      String
+  
+  type        StoreTransactionType
+  category    String  // SALE, EXPENSE, REVENUE, CASH_REGISTER_OPEN, CASH_REGISTER_CLOSE
+  amount      Float
+  
+  balanceBefore Float
+  balanceAfter  Float
+  
+  reference   String?
+  description String
+  
+  createdAt   DateTime @default(now())
+
+  // Relations
+  store Store @relation(fields: [storeId], references: [id])
+  user  User  @relation(fields: [userId], references: [id])
+
+  @@index([storeId])
+  @@index([userId])
+  @@index([type])
+  @@index([category])
+  @@index([createdAt])
 }
 
 // ==================== STOCK ====================
@@ -346,8 +386,9 @@ model Expense {
 model Revenue {
   id          String   @id @default(cuid())
   userId      String
+  storeId     String   // ⭐ Champ ajouté
   
-  category    String   // Vente, Autre revenu, etc.
+  category    String
   description String
   amount      Float
   reference   String?
@@ -357,9 +398,11 @@ model Revenue {
   updatedAt   DateTime @updatedAt
 
   // Relations
-  user User @relation(fields: [userId], references: [id])
+  user  User  @relation(fields: [userId], references: [id])
+  store Store @relation(fields: [storeId], references: [id])
 
   @@index([userId])
+  @@index([storeId])
   @@index([category])
   @@index([date])
 }

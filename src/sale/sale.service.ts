@@ -7,6 +7,7 @@ import {
 import { PrismaService } from 'src/common/services/prisma.service';
 import { CreateSaleDto } from './dto/create-sale.dto';
 import { UpdateSaleDto, SaleStatus } from './dto/update-sale.dto';
+import { StoreFinanceService } from 'src/common/services/store-finance.service'; 
 
 // Type pour les items validés
 interface ValidatedItem {
@@ -20,7 +21,10 @@ interface ValidatedItem {
 
 @Injectable()
 export class SaleService {
-  constructor(private readonly prisma: PrismaService) { }
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly storeFinance: StoreFinanceService
+  ) { }
 
   /**
    * Générer un numéro de vente unique
@@ -267,6 +271,17 @@ export class SaleService {
 
         return newSale;
       });
+
+      if (paymentMethod !== 'CASH') {
+        await this.storeFinance.creditStore(
+          storeId,
+          userId,
+          total,
+          'SALE',
+          `Vente #${saleNumber} (${paymentMethod})`,
+          sale.id,
+        );
+      }
 
       return {
         data: sale,

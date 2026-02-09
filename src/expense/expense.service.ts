@@ -6,14 +6,19 @@ import {
 import { PrismaService } from 'src/common/services/prisma.service';
 import { CreateExpenseDto } from './dto/create-expense.dto';
 import { UpdateExpenseDto } from './dto/update-expense.dto';
+import { StoreFinanceService } from 'src/common/services/store-finance.service';
 
 @Injectable()
 export class ExpenseService {
-  constructor(private readonly prisma: PrismaService) { }
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly storeFinance: StoreFinanceService,
+  ) { }
 
   /**
    * Créer une nouvelle dépense
    */
+
   async create(createExpenseDto: CreateExpenseDto, userId: string) {
     try {
       const { storeId, category, description, amount, reference, paymentMethod, date } = createExpenseDto;
@@ -24,45 +29,67 @@ export class ExpenseService {
       });
 
       if (!store) {
-        throw new NotFoundException(
-          `Magasin avec l'ID "${storeId}" non trouvé`,
-        );
+        throw new NotFoundException(`Magasin avec l'ID "${storeId}" non trouvé`);
       }
 
       if (!store.isActive) {
+        throw new BadRequestException(`Le magasin "${store.name}" est désactivé`);
+      }
+
+      // ⭐ NOUVEAU : Vérifier le solde avant de créer la dépense
+      const hasBalance = await this.storeFinance.checkBalance(storeId, amount);
+      if (!hasBalance) {
+        const currentBalance = await this.storeFinance.getBalance(storeId);
         throw new BadRequestException(
-          `Le magasin "${store.name}" est désactivé`,
+          `Solde insuffisant au magasin "${store.name}". ` +
+          `Disponible: ${currentBalance.toLocaleString()} GNF, ` +
+          `Requis: ${amount.toLocaleString()} GNF`
         );
       }
 
-      // Créer la dépense
-      const expense = await this.prisma.expense.create({
-        data: {
+      // Créer la dépense ET débiter le magasin dans une transaction
+      const expense = await this.prisma.$transaction(async (tx) => {
+        // 1. Créer la dépense
+        const newExpense = await tx.expense.create({
+          data: {
+            storeId,
+            userId,
+            category: category.trim(),
+            description: description.trim(),
+            amount,
+            reference: reference?.trim() || null,
+            paymentMethod: paymentMethod || null,
+            date: date || new Date(),
+          },
+          include: {
+            store: {
+              select: {
+                id: true,
+                name: true,
+                city: true,
+              },
+            },
+            user: {
+              select: {
+                id: true,
+                name: true,
+                email: true,
+              },
+            },
+          },
+        });
+
+        // 2. Débiter le magasin
+        await this.storeFinance.debitStore(
           storeId,
           userId,
-          category: category.trim(),
-          description: description.trim(),
           amount,
-          reference: reference?.trim() || null,
-          paymentMethod: paymentMethod || null,
-          date: date || new Date(),
-        },
-        include: {
-          store: {
-            select: {
-              id: true,
-              name: true,
-              city: true,
-            },
-          },
-          user: {
-            select: {
-              id: true,
-              name: true,
-              email: true,
-            },
-          },
-        },
+          'EXPENSE',
+          `Dépense: ${category} - ${description}`,
+          newExpense.id,
+        );
+
+        return newExpense;
       });
 
       return {
