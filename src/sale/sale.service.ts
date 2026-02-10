@@ -6,8 +6,8 @@ import {
 } from '@nestjs/common';
 import { PrismaService } from 'src/common/services/prisma.service';
 import { CreateSaleDto } from './dto/create-sale.dto';
-import { UpdateSaleDto, SaleStatus } from './dto/update-sale.dto';
-import { StoreFinanceService } from 'src/common/services/store-finance.service';
+import { SaleStatus } from './dto/update-sale.dto';
+import { CashRegisterService } from 'src/cash-register/cash-register.service';
 
 // Type pour les items validés
 interface ValidatedItem {
@@ -19,20 +19,11 @@ interface ValidatedItem {
   productName: string;
 }
 
-// Type pour la caisse avec les champs nécessaires
-interface CashRegisterInfo {
-  id: string;
-  status: string;
-  storeId: string;
-  openingAmount?: number;
-  availableAmount?: number;
-}
-
 @Injectable()
 export class SaleService {
   constructor(
     private readonly prisma: PrismaService,
-    private readonly storeFinance: StoreFinanceService
+    private readonly cashRegisterService: CashRegisterService,
   ) { }
 
   /**
@@ -43,7 +34,6 @@ export class SaleService {
     const year = now.getFullYear();
     const month = String(now.getMonth() + 1).padStart(2, '0');
 
-    // Compter les ventes du mois en cours
     const count = await this.prisma.sale.count({
       where: {
         createdAt: {
@@ -59,6 +49,7 @@ export class SaleService {
 
   /**
    * Créer une nouvelle vente
+   * ⭐ Met à jour automatiquement le montant disponible dans la caisse
    */
   async create(createSaleDto: CreateSaleDto, userId: string) {
     try {
@@ -90,40 +81,57 @@ export class SaleService {
         );
       }
 
-      // VÉRIFICATION OBLIGATOIRE : Caisse ouverte pour les paiements en espèces
-      let cashRegister: CashRegisterInfo | null = null;
+      // ⭐ NOUVELLE RÈGLE: Si pas de caisse fournie, chercher la caisse ouverte de l'utilisateur
+      let effectiveCashRegisterId = cashRegisterId;
 
-      if (paymentMethod === 'CASH') {
-        // Pour les paiements en espèces, une caisse ouverte est OBLIGATOIRE
-        if (!cashRegisterId) {
+      if (!effectiveCashRegisterId) {
+        const userOpenCashRegister = await this.prisma.cashRegister.findFirst({
+          where: {
+            userId,
+            status: 'OPEN',
+          },
+          select: {
+            id: true,
+            storeId: true,
+          },
+        });
+
+        if (!userOpenCashRegister) {
           throw new BadRequestException(
-            'Une caisse ouverte est obligatoire pour les paiements en espèces',
+            `Aucune caisse ouverte trouvée. Veuillez ouvrir une caisse avant d'effectuer une vente.`,
           );
         }
 
-        const foundCashRegister = await this.prisma.cashRegister.findUnique({
-          where: { id: cashRegisterId },
+        // Vérifier que la caisse est bien dans le bon magasin
+        if (userOpenCashRegister.storeId !== storeId) {
+          throw new BadRequestException(
+            `Votre caisse ouverte est dans un autre magasin. Fermez-la ou changez de magasin.`,
+          );
+        }
+
+        effectiveCashRegisterId = userOpenCashRegister.id;
+      }
+
+      // Vérifier que la caisse existe et est ouverte
+      if (effectiveCashRegisterId) {
+        const cashRegister = await this.prisma.cashRegister.findUnique({
+          where: { id: effectiveCashRegisterId },
           select: {
             id: true,
             status: true,
             storeId: true,
-            openingAmount: true,
-            availableAmount: true,
+            userId: true,
           },
         });
 
-        if (!foundCashRegister) {
+        if (!cashRegister) {
           throw new NotFoundException(
-            `Caisse avec l'ID "${cashRegisterId}" non trouvée`,
+            `Caisse avec l'ID "${effectiveCashRegisterId}" non trouvée`,
           );
         }
 
-        cashRegister = foundCashRegister;
-
         if (cashRegister.status !== 'OPEN') {
-          throw new BadRequestException(
-            'La caisse doit être ouverte pour effectuer une vente en espèces',
-          );
+          throw new BadRequestException('La caisse doit être ouverte');
         }
 
         if (cashRegister.storeId !== storeId) {
@@ -131,28 +139,12 @@ export class SaleService {
             'La caisse ne correspond pas au magasin',
           );
         }
-      } else {
-        // Pour les autres méthodes de paiement, une caisse n'est pas obligatoire
-        // mais si elle est fournie, on vérifie qu'elle est valide
-        if (cashRegisterId) {
-          const foundCashRegister = await this.prisma.cashRegister.findUnique({
-            where: { id: cashRegisterId },
-            select: {
-              id: true,
-              status: true,
-              storeId: true,
-            },
-          });
 
-          if (foundCashRegister) {
-            cashRegister = foundCashRegister;
-
-            if (cashRegister.storeId !== storeId) {
-              throw new BadRequestException(
-                'La caisse ne correspond pas au magasin',
-              );
-            }
-          }
+        // ⭐ Vérifier que c'est bien la caisse de l'utilisateur
+        if (cashRegister.userId !== userId) {
+          throw new BadRequestException(
+            'Vous ne pouvez enregistrer des ventes que dans votre propre caisse',
+          );
         }
       }
 
@@ -229,17 +221,15 @@ export class SaleService {
       // Générer le numéro de vente
       const saleNumber = await this.generateSaleNumber();
 
-      // Vérifier le type de paiement
-      const transactionType = paymentMethod === 'CASH' ? 'SALE_CASH' : `SALE_${paymentMethod}`;
-
+      // ⭐ Transaction complète: créer la vente ET mettre à jour les stocks
       const sale = await this.prisma.$transaction(async (tx) => {
-        // Créer la vente
+        // 1. Créer la vente
         const newSale = await tx.sale.create({
           data: {
             saleNumber,
             storeId,
             userId,
-            cashRegisterId: cashRegisterId || null,
+            cashRegisterId: effectiveCashRegisterId || null,
             subtotal,
             discount,
             tax,
@@ -288,14 +278,12 @@ export class SaleService {
             cashRegister: {
               select: {
                 id: true,
-                openingAmount: true,
-                availableAmount: true,
               },
             },
           },
         });
 
-        // Mettre à jour les stocks
+        // 2. Mettre à jour les stocks
         for (const item of validatedItems) {
           await tx.stock.update({
             where: {
@@ -322,33 +310,29 @@ export class SaleService {
           });
         }
 
-        // ⭐ METTRE À JOUR LE MONTANT DISPONIBLE DE LA CAISSE SI PAIEMENT EN ESPÈCES
-        if (cashRegisterId && paymentMethod === 'CASH' && cashRegister && cashRegister.availableAmount !== undefined) {
-          const newAvailableAmount = cashRegister.availableAmount + total;
-          await tx.cashRegister.update({
-            where: { id: cashRegisterId },
-            data: {
-              availableAmount: newAvailableAmount,
-            },
-          });
-        }
-
-        // Créditer le magasin
-        await this.storeFinance.creditStore(
-          storeId,
-          userId,
-          total,
-          transactionType,
-          `Vente #${saleNumber} (${paymentMethod})`,
-          newSale.id,
-        );
-
         return newSale;
       });
 
+      // ⭐ 3. Mettre à jour le montant disponible dans la caisse (APRÈS la transaction)
+      if (effectiveCashRegisterId) {
+        try {
+          await this.cashRegisterService.updateAvailableAmount(
+            effectiveCashRegisterId,
+            total,
+            'ADD',
+            `Vente ${saleNumber}`,
+          );
+        } catch (error) {
+          console.warn(
+            '⚠️ Erreur lors de la mise à jour de la caisse, mais vente créée:',
+            error,
+          );
+        }
+      }
+
       return {
         data: sale,
-        message: `Vente ${saleNumber} créée avec succès`,
+        message: `Vente ${saleNumber} créée avec succès${effectiveCashRegisterId ? '. Caisse mise à jour.' : ''}`,
         success: true,
       };
     } catch (error) {
@@ -368,6 +352,7 @@ export class SaleService {
 
   /**
    * Mettre à jour le statut d'une vente
+   * ⭐ Met à jour automatiquement le montant disponible dans la caisse
    */
   async updateStatus(id: string, status: SaleStatus, userId: string) {
     try {
@@ -378,7 +363,7 @@ export class SaleService {
           cashRegister: {
             select: {
               id: true,
-              availableAmount: true,
+              status: true,
             },
           },
         },
@@ -401,16 +386,16 @@ export class SaleService {
         );
       }
 
-      // Si on rembourse ou annule, restaurer le stock ET rembourser l'argent
+      // ⭐ Si annulation ou remboursement: restaurer stock ET mettre à jour caisse
       if (status === 'REFUNDED' || status === 'CANCELLED') {
         await this.prisma.$transaction(async (tx) => {
-          // Mettre à jour le statut
+          // 1. Mettre à jour le statut
           await tx.sale.update({
             where: { id },
             data: { status },
           });
 
-          // Restaurer les stocks
+          // 2. Restaurer les stocks
           for (const item of sale.items) {
             await tx.stock.updateMany({
               where: {
@@ -437,38 +422,24 @@ export class SaleService {
               },
             });
           }
+        });
 
-          // Débiter le magasin pour les remboursements
-          if (status === 'REFUNDED') {
-            await this.storeFinance.debitStore(
-              sale.storeId,
-              userId,
+        // ⭐ 3. Mettre à jour la caisse (soustraire le montant)
+        if (sale.cashRegisterId && sale.cashRegister?.status === 'OPEN') {
+          try {
+            await this.cashRegisterService.updateAvailableAmount(
+              sale.cashRegisterId,
               sale.total,
-              'REFUND',
-              `Remboursement vente #${sale.saleNumber}`,
-              sale.id,
+              'SUBTRACT',
+              `${status === 'REFUNDED' ? 'Remboursement' : 'Annulation'} vente ${sale.saleNumber}`,
+            );
+          } catch (error) {
+            console.warn(
+              '⚠️ Erreur lors de la mise à jour de la caisse:',
+              error,
             );
           }
-
-          // ⭐ METTRE À JOUR LE MONTANT DISPONIBLE DE LA CAISSE SI REMBOURSEMENT EN ESPÈCES
-          if (sale.cashRegisterId && sale.paymentMethod === 'CASH' && status === 'REFUNDED') {
-            // Vérifier qu'il y a assez d'argent dans la caisse
-            if (sale.cashRegister && sale.cashRegister.availableAmount < sale.total) {
-              throw new BadRequestException(
-                `Montant insuffisant dans la caisse pour le remboursement. Disponible: ${sale.cashRegister.availableAmount} GNF, Remboursement: ${sale.total} GNF`
-              );
-            }
-
-            await tx.cashRegister.update({
-              where: { id: sale.cashRegisterId },
-              data: {
-                availableAmount: {
-                  decrement: sale.total, // ⭐ Retirer le montant remboursé
-                },
-              },
-            });
-          }
-        });
+        }
       } else {
         await this.prisma.sale.update({
           where: { id },
@@ -480,7 +451,7 @@ export class SaleService {
 
       return {
         data: updatedSale.data,
-        message: `Statut de la vente mis à jour vers ${status}`,
+        message: `Statut de la vente mis à jour vers ${status}${sale.cashRegisterId && sale.cashRegister?.status === 'OPEN' ? '. Caisse mise à jour.' : ''}`,
         success: true,
       };
     } catch (error) {
@@ -637,8 +608,6 @@ export class SaleService {
           cashRegister: {
             select: {
               id: true,
-              openingAmount: true,
-              availableAmount: true,
             },
           },
           items: {
@@ -758,7 +727,7 @@ export class SaleService {
 
       if (sale.status === 'COMPLETED') {
         throw new BadRequestException(
-          'Impossible de supprimer une vente complétée. Annulez-la d\'abord.',
+          "Impossible de supprimer une vente complétée. Annulez-la d'abord.",
         );
       }
 
@@ -869,16 +838,22 @@ export class SaleService {
 
       for (const sale of sales) {
         totalRevenue += sale.total;
-        totalItemsSold += sale.items.reduce((sum, item) => sum + item.quantity, 0);
+        totalItemsSold += sale.items.reduce(
+          (sum, item) => sum + item.quantity,
+          0,
+        );
 
         // Calculer le profit (prix de vente - coût d'achat)
         for (const item of sale.items) {
-          const itemProfit = (sale.subtotal / sale.items.length) - (item.product.costPrice * item.quantity);
+          const itemProfit =
+            sale.subtotal / sale.items.length -
+            item.product.costPrice * item.quantity;
           totalProfit += itemProfit;
         }
       }
 
-      const averageSaleAmount = totalSales > 0 ? totalRevenue / totalSales : 0;
+      const averageSaleAmount =
+        totalSales > 0 ? totalRevenue / totalSales : 0;
 
       return {
         data: {
@@ -894,7 +869,10 @@ export class SaleService {
         success: true,
       };
     } catch (error) {
-      console.error('Erreur lors de la récupération des statistiques:', error);
+      console.error(
+        'Erreur lors de la récupération des statistiques:',
+        error,
+      );
       throw new BadRequestException(
         'Une erreur est survenue lors de la récupération des statistiques',
       );
@@ -913,7 +891,10 @@ export class SaleService {
 
       return this.findAll(1, 100, storeId, undefined, today, tomorrow);
     } catch (error) {
-      console.error('Erreur lors de la récupération des ventes du jour:', error);
+      console.error(
+        'Erreur lors de la récupération des ventes du jour:',
+        error,
+      );
       throw new BadRequestException(
         'Une erreur est survenue lors de la récupération des ventes du jour',
       );

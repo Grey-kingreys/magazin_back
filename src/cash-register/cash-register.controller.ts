@@ -23,11 +23,11 @@ import {
 import { CashRegisterService } from './cash-register.service';
 import { OpenCashRegisterDto } from './dto/open-cash-register.dto';
 import { CloseCashRegisterDto } from './dto/close-cash-register.dto';
+import { UpdateCashRegisterDto } from './dto/update-cash-register.dto';
 import { AuthGuard } from 'src/common/guards/auth.guard';
 import { RolesGuard } from 'src/common/guards/roles.guard';
 import { Roles } from 'src/common/decorators/roles.decorator';
 import { RequestWithUser } from 'src/auth/jwt.strategy';
-import { UpdateCashRegisterDto } from './dto/update-cash-register.dto';
 
 @ApiTags('Caisse (POS)')
 @Controller('cash-register')
@@ -43,7 +43,7 @@ export class CashRegisterController {
   @Roles('ADMIN', 'MANAGER', 'STORE_MANAGER', 'CASHIER')
   @ApiOperation({
     summary: 'Ouvrir une caisse',
-    description: 'Ouvre une nouvelle caisse pour un magasin',
+    description: 'Ouvre une nouvelle caisse. Un utilisateur ne peut avoir qu\'une seule caisse ouverte à la fois. La caisse sera liée à votre compte pour traçabilité.',
   })
   @ApiResponse({
     status: 201,
@@ -54,20 +54,8 @@ export class CashRegisterController {
     description: 'Données invalides',
   })
   @ApiResponse({
-    status: 401,
-    description: 'Non authentifié',
-  })
-  @ApiResponse({
-    status: 403,
-    description: 'Accès refusé',
-  })
-  @ApiResponse({
-    status: 404,
-    description: 'Magasin non trouvé',
-  })
-  @ApiResponse({
     status: 409,
-    description: 'Une caisse est déjà ouverte',
+    description: 'Vous avez déjà une caisse ouverte',
   })
   open(
     @Body() openCashRegisterDto: OpenCashRegisterDto,
@@ -86,7 +74,7 @@ export class CashRegisterController {
   @Roles('ADMIN', 'MANAGER', 'STORE_MANAGER', 'CASHIER')
   @ApiOperation({
     summary: 'Fermer une caisse',
-    description: 'Ferme une caisse et calcule les différences',
+    description: 'Ferme votre caisse. Compare le montant compté avec le montant disponible. Un commentaire est OBLIGATOIRE si une différence est détectée.',
   })
   @ApiParam({
     name: 'id',
@@ -99,82 +87,72 @@ export class CashRegisterController {
   })
   @ApiResponse({
     status: 400,
-    description: 'Données invalides ou caisse déjà fermée',
-  })
-  @ApiResponse({
-    status: 401,
-    description: 'Non authentifié',
+    description: 'Commentaire obligatoire si différence détectée',
   })
   @ApiResponse({
     status: 403,
-    description: 'Accès refusé',
+    description: 'Vous ne pouvez fermer que votre propre caisse',
   })
-  @ApiResponse({
-    status: 404,
-    description: 'Caisse non trouvée',
-  })
-  close(@Param('id') id: string, @Body() closeCashRegisterDto: CloseCashRegisterDto) {
-    return this.cashRegisterService.close(id, closeCashRegisterDto);
+  close(
+    @Param('id') id: string,
+    @Body() closeCashRegisterDto: CloseCashRegisterDto,
+    @Req() request: RequestWithUser,
+  ) {
+    return this.cashRegisterService.close(id, closeCashRegisterDto, request.user.userId);
   }
 
   /**
-   * Récupérer toutes les caisses
+   * Mettre à jour une caisse (ADMIN uniquement - réassignation)
    */
+  @Patch(':id')
+  @Roles('ADMIN')
+  @ApiOperation({
+    summary: 'Réassigner une caisse (Admin uniquement)',
+    description: 'Permet à un admin de réassigner une caisse à un autre utilisateur',
+  })
+  @ApiParam({
+    name: 'id',
+    description: 'ID de la caisse',
+    example: 'clx7b8k9l0000xtqp1234abcd',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Caisse réassignée avec succès',
+  })
+  @ApiResponse({
+    status: 400,
+    description: 'Impossible de modifier une caisse fermée',
+  })
+  @ApiResponse({
+    status: 403,
+    description: 'Accès refusé - Rôle ADMIN requis',
+  })
+  @ApiResponse({
+    status: 409,
+    description: 'Le nouvel utilisateur a déjà une caisse ouverte',
+  })
+  update(
+    @Param('id') id: string,
+    @Body() updateCashRegisterDto: UpdateCashRegisterDto,
+    @Req() request: RequestWithUser,
+  ) {
+    return this.cashRegisterService.update(id, updateCashRegisterDto, request.user.userId);
+  }
+
+  // Les autres routes restent identiques...
+
   @Get()
   @Roles('ADMIN', 'MANAGER', 'STORE_MANAGER')
   @ApiOperation({
     summary: 'Liste des caisses',
     description: 'Récupère la liste de toutes les caisses avec pagination et filtres',
   })
-  @ApiQuery({
-    name: 'page',
-    required: false,
-    description: 'Numéro de la page',
-    example: 1,
-  })
-  @ApiQuery({
-    name: 'limit',
-    required: false,
-    description: "Nombre d'éléments par page",
-    example: 50,
-  })
-  @ApiQuery({
-    name: 'storeId',
-    required: false,
-    description: 'Filtrer par magasin',
-    example: 'clx7b8k9l0000xtqp5678efgh',
-  })
-  @ApiQuery({
-    name: 'status',
-    required: false,
-    description: 'Filtrer par statut',
-    enum: ['OPEN', 'CLOSED'],
-    example: 'OPEN',
-  })
-  @ApiQuery({
-    name: 'startDate',
-    required: false,
-    description: 'Date de début (ISO 8601)',
-    example: '2024-02-01T00:00:00.000Z',
-  })
-  @ApiQuery({
-    name: 'endDate',
-    required: false,
-    description: 'Date de fin (ISO 8601)',
-    example: '2024-02-28T23:59:59.999Z',
-  })
-  @ApiResponse({
-    status: 200,
-    description: 'Liste des caisses récupérée',
-  })
-  @ApiResponse({
-    status: 401,
-    description: 'Non authentifié',
-  })
-  @ApiResponse({
-    status: 403,
-    description: 'Accès refusé - Rôle ADMIN, MANAGER ou STORE_MANAGER requis',
-  })
+  @ApiQuery({ name: 'page', required: false, example: 1 })
+  @ApiQuery({ name: 'limit', required: false, example: 50 })
+  @ApiQuery({ name: 'storeId', required: false })
+  @ApiQuery({ name: 'status', required: false, enum: ['OPEN', 'CLOSED'] })
+  @ApiQuery({ name: 'startDate', required: false })
+  @ApiQuery({ name: 'endDate', required: false })
   findAll(
     @Query('page', new DefaultValuePipe(1), ParseIntPipe) page: number,
     @Query('limit', new DefaultValuePipe(50), ParseIntPipe) limit: number,
@@ -189,45 +167,15 @@ export class CashRegisterController {
     return this.cashRegisterService.findAll(page, limit, storeId, status, start, end);
   }
 
-  /**
-   * Récupérer les statistiques des caisses
-   */
   @Get('stats')
   @Roles('ADMIN', 'MANAGER')
   @ApiOperation({
     summary: 'Statistiques des caisses',
     description: 'Récupère des statistiques globales sur les caisses',
   })
-  @ApiQuery({
-    name: 'storeId',
-    required: false,
-    description: 'Filtrer par magasin',
-    example: 'clx7b8k9l0000xtqp5678efgh',
-  })
-  @ApiQuery({
-    name: 'startDate',
-    required: false,
-    description: 'Date de début (ISO 8601)',
-    example: '2024-02-01T00:00:00.000Z',
-  })
-  @ApiQuery({
-    name: 'endDate',
-    required: false,
-    description: 'Date de fin (ISO 8601)',
-    example: '2024-02-28T23:59:59.999Z',
-  })
-  @ApiResponse({
-    status: 200,
-    description: 'Statistiques récupérées',
-  })
-  @ApiResponse({
-    status: 401,
-    description: 'Non authentifié',
-  })
-  @ApiResponse({
-    status: 403,
-    description: 'Accès refusé - Rôle ADMIN ou MANAGER requis',
-  })
+  @ApiQuery({ name: 'storeId', required: false })
+  @ApiQuery({ name: 'startDate', required: false })
+  @ApiQuery({ name: 'endDate', required: false })
   getStats(
     @Query('storeId') storeId?: string,
     @Query('startDate') startDate?: string,
@@ -239,145 +187,34 @@ export class CashRegisterController {
     return this.cashRegisterService.getStats(storeId, start, end);
   }
 
-  /**
-   * Récupérer la caisse ouverte de l'utilisateur connecté
-   */
   @Get('my-open-register')
   @Roles('ADMIN', 'MANAGER', 'STORE_MANAGER', 'CASHIER')
   @ApiOperation({
     summary: 'Ma caisse ouverte',
-    description: "Récupère la caisse actuellement ouverte de l'utilisateur connecté",
-  })
-  @ApiResponse({
-    status: 200,
-    description: 'Caisse ouverte récupérée',
-  })
-  @ApiResponse({
-    status: 401,
-    description: 'Non authentifié',
-  })
-  @ApiResponse({
-    status: 403,
-    description: 'Accès refusé',
+    description: "Récupère votre caisse actuellement ouverte",
   })
   findMyOpenRegister(@Req() request: RequestWithUser) {
     return this.cashRegisterService.findOpenByUser(request.user.userId);
   }
 
-  /**
- * Mettre à jour une caisse ouverte
- */
-  @Patch(':id')
-  @Roles('ADMIN', 'MANAGER', 'STORE_MANAGER', 'CASHIER')
-  @ApiOperation({
-    summary: 'Mettre à jour une caisse ouverte',
-    description: 'Met à jour une caisse ouverte (fonds de caisse ou notes)',
-  })
-  @ApiParam({
-    name: 'id',
-    description: 'ID de la caisse',
-    example: 'clx7b8k9l0000xtqp1234abcd',
-  })
-  @ApiResponse({
-    status: 200,
-    description: 'Caisse mise à jour avec succès',
-  })
-  @ApiResponse({
-    status: 400,
-    description: 'Données invalides ou caisse fermée',
-  })
-  @ApiResponse({
-    status: 401,
-    description: 'Non authentifié',
-  })
-  @ApiResponse({
-    status: 403,
-    description: 'Accès refusé',
-  })
-  @ApiResponse({
-    status: 404,
-    description: 'Caisse non trouvée',
-  })
-  @ApiResponse({
-    status: 409,
-    description: 'Solde insuffisant',
-  })
-  update(
-    @Param('id') id: string,
-    @Body() updateCashRegisterDto: UpdateCashRegisterDto,
-    @Req() request: RequestWithUser,
-  ) {
-    return this.cashRegisterService.update(id, updateCashRegisterDto, request.user.userId);
-  }
-
-  /**
-   * Récupérer une caisse par ID
-   */
   @Get(':id')
   @Roles('ADMIN', 'MANAGER', 'STORE_MANAGER', 'CASHIER')
   @ApiOperation({
     summary: "Détails d'une caisse",
     description: "Récupère les détails d'une caisse spécifique",
   })
-  @ApiParam({
-    name: 'id',
-    description: 'ID de la caisse',
-    example: 'clx7b8k9l0000xtqp1234abcd',
-  })
-  @ApiResponse({
-    status: 200,
-    description: 'Caisse trouvée',
-  })
-  @ApiResponse({
-    status: 401,
-    description: 'Non authentifié',
-  })
-  @ApiResponse({
-    status: 403,
-    description: 'Accès refusé',
-  })
-  @ApiResponse({
-    status: 404,
-    description: 'Caisse non trouvée',
-  })
+  @ApiParam({ name: 'id', description: 'ID de la caisse' })
   findOne(@Param('id') id: string) {
     return this.cashRegisterService.findOne(id);
   }
 
-  /**
-   * Supprimer une caisse
-   */
   @Delete(':id')
   @Roles('ADMIN')
   @ApiOperation({
     summary: 'Supprimer une caisse',
     description: 'Supprime une caisse (uniquement si aucune vente associée)',
   })
-  @ApiParam({
-    name: 'id',
-    description: 'ID de la caisse',
-    example: 'clx7b8k9l0000xtqp1234abcd',
-  })
-  @ApiResponse({
-    status: 200,
-    description: 'Caisse supprimée avec succès',
-  })
-  @ApiResponse({
-    status: 401,
-    description: 'Non authentifié',
-  })
-  @ApiResponse({
-    status: 403,
-    description: 'Accès refusé - Rôle ADMIN requis',
-  })
-  @ApiResponse({
-    status: 404,
-    description: 'Caisse non trouvée',
-  })
-  @ApiResponse({
-    status: 409,
-    description: 'Impossible de supprimer une caisse avec des ventes',
-  })
+  @ApiParam({ name: 'id', description: 'ID de la caisse' })
   remove(@Param('id') id: string) {
     return this.cashRegisterService.remove(id);
   }
