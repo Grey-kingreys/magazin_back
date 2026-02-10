@@ -18,7 +18,6 @@ export class ExpenseService {
   /**
    * Créer une nouvelle dépense
    */
-
   async create(createExpenseDto: CreateExpenseDto, userId: string) {
     try {
       const { storeId, category, description, amount, reference, paymentMethod, date } = createExpenseDto;
@@ -36,7 +35,7 @@ export class ExpenseService {
         throw new BadRequestException(`Le magasin "${store.name}" est désactivé`);
       }
 
-      // ⭐ NOUVEAU : Vérifier le solde avant de créer la dépense
+      // ⭐ Vérifier le solde avant de créer la dépense
       const hasBalance = await this.storeFinance.checkBalance(storeId, amount);
       if (!hasBalance) {
         const currentBalance = await this.storeFinance.getBalance(storeId);
@@ -47,6 +46,42 @@ export class ExpenseService {
         );
       }
 
+      // ====== NOUVELLE FONCTIONNALITÉ : GESTION DES DÉPENSES EN ESPÈCES ======
+      // Si c'est une dépense en espèces, vérifier s'il y a une caisse ouverte
+      let cashRegisterId = "";
+      if (paymentMethod === 'CASH') {
+        // Chercher une caisse ouverte dans ce magasin
+        const openCashRegister = await this.prisma.cashRegister.findFirst({
+          where: {
+            storeId,
+            status: 'OPEN',
+          },
+          select: {
+            id: true,
+            userId: true,
+            store: {
+              select: {
+                name: true,
+              },
+            },
+          },
+        });
+
+        if (!openCashRegister) {
+          throw new BadRequestException(
+            `Aucune caisse ouverte dans le magasin "${store.name}" pour effectuer un paiement en espèces. ` +
+            `Ouvrez une caisse d'abord ou utilisez un autre mode de paiement.`
+          );
+        }
+
+        cashRegisterId = openCashRegister.id;
+
+        // Noter dans la description que c'est payé depuis une caisse spécifique
+        const enhancedDescription = `${description} [Payé depuis caisse de ${openCashRegister.userId}]`;
+        createExpenseDto.description = enhancedDescription;
+      }
+      // ====== FIN DE LA NOUVELLE FONCTIONNALITÉ ======
+
       // Créer la dépense ET débiter le magasin dans une transaction
       const expense = await this.prisma.$transaction(async (tx) => {
         // 1. Créer la dépense
@@ -55,7 +90,7 @@ export class ExpenseService {
             storeId,
             userId,
             category: category.trim(),
-            description: description.trim(),
+            description: createExpenseDto.description.trim(), // Utiliser la description potentiellement modifiée
             amount,
             reference: reference?.trim() || null,
             paymentMethod: paymentMethod || null,
@@ -371,6 +406,18 @@ export class ExpenseService {
         throw new NotFoundException(`Dépense avec l'ID "${id}" non trouvée`);
       }
 
+      // Si la dépense a été débitée, créditer le magasin pour annuler
+      if (expense.amount > 0) {
+        await this.storeFinance.creditStore(
+          expense.storeId,
+          expense.userId,
+          expense.amount,
+          'EXPENSE_CANCELLATION',
+          `Annulation dépense: ${expense.category}`,
+          expense.id,
+        );
+      }
+
       await this.prisma.expense.delete({
         where: { id },
       });
@@ -453,6 +500,7 @@ export class ExpenseService {
           select: {
             amount: true,
             category: true,
+            paymentMethod: true,
           },
         }),
 
@@ -485,6 +533,17 @@ export class ExpenseService {
       // Calculer le total des dépenses
       const totalAmount = expenses.reduce((sum, expense) => sum + expense.amount, 0);
 
+      // Calculer les dépenses par méthode de paiement
+      const expensesByPaymentMethod = expenses.reduce((acc, expense) => {
+        const method = expense.paymentMethod || 'UNKNOWN';
+        if (!acc[method]) {
+          acc[method] = { count: 0, total: 0 };
+        }
+        acc[method].count++;
+        acc[method].total += expense.amount;
+        return acc;
+      }, {} as Record<string, { count: number; total: number }>);
+
       return {
         data: {
           totalExpenses,
@@ -493,6 +552,7 @@ export class ExpenseService {
             totalExpenses > 0 ? Math.round(totalAmount / totalExpenses) : 0,
           expensesByCategory,
           expensesByStore,
+          expensesByPaymentMethod,
         },
         message: 'Statistiques des dépenses récupérées',
         success: true,

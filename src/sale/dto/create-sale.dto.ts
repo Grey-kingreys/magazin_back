@@ -71,7 +71,7 @@ export class CreateSaleDto {
 
     @ApiProperty({
         example: 'clx7b8k9l0000xtqp9012ijkl',
-        description: 'ID de la caisse (optionnel)',
+        description: 'ID de la caisse (obligatoire pour paiement en espèces, optionnel pour autres méthodes)',
         required: false,
     })
     @IsOptional()

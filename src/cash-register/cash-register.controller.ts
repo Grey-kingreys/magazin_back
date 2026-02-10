@@ -27,6 +27,7 @@ import { AuthGuard } from 'src/common/guards/auth.guard';
 import { RolesGuard } from 'src/common/guards/roles.guard';
 import { Roles } from 'src/common/decorators/roles.decorator';
 import { RequestWithUser } from 'src/auth/jwt.strategy';
+import { UpdateCashRegisterDto } from './dto/update-cash-register.dto';
 
 @ApiTags('Caisse (POS)')
 @Controller('cash-register')
@@ -261,6 +262,52 @@ export class CashRegisterController {
   })
   findMyOpenRegister(@Req() request: RequestWithUser) {
     return this.cashRegisterService.findOpenByUser(request.user.userId);
+  }
+
+  /**
+ * Mettre à jour une caisse ouverte
+ */
+  @Patch(':id')
+  @Roles('ADMIN', 'MANAGER', 'STORE_MANAGER', 'CASHIER')
+  @ApiOperation({
+    summary: 'Mettre à jour une caisse ouverte',
+    description: 'Met à jour une caisse ouverte (fonds de caisse ou notes)',
+  })
+  @ApiParam({
+    name: 'id',
+    description: 'ID de la caisse',
+    example: 'clx7b8k9l0000xtqp1234abcd',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Caisse mise à jour avec succès',
+  })
+  @ApiResponse({
+    status: 400,
+    description: 'Données invalides ou caisse fermée',
+  })
+  @ApiResponse({
+    status: 401,
+    description: 'Non authentifié',
+  })
+  @ApiResponse({
+    status: 403,
+    description: 'Accès refusé',
+  })
+  @ApiResponse({
+    status: 404,
+    description: 'Caisse non trouvée',
+  })
+  @ApiResponse({
+    status: 409,
+    description: 'Solde insuffisant',
+  })
+  update(
+    @Param('id') id: string,
+    @Body() updateCashRegisterDto: UpdateCashRegisterDto,
+    @Req() request: RequestWithUser,
+  ) {
+    return this.cashRegisterService.update(id, updateCashRegisterDto, request.user.userId);
   }
 
   /**

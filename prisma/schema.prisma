@@ -333,8 +333,9 @@ model CashRegister {
   userId        String
   
   openingAmount Float
+  availableAmount Float            @default(0)  
   closingAmount Float?
-  expectedAmount Float?            // Montant théorique
+  expectedAmount Float?            // Montant théorique (calculé)
   difference    Float?             // Écart
   
   status        CashRegisterStatus @default(OPEN)

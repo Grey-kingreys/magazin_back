@@ -7,7 +7,7 @@ import {
 import { PrismaService } from 'src/common/services/prisma.service';
 import { CreateSaleDto } from './dto/create-sale.dto';
 import { UpdateSaleDto, SaleStatus } from './dto/update-sale.dto';
-import { StoreFinanceService } from 'src/common/services/store-finance.service'; 
+import { StoreFinanceService } from 'src/common/services/store-finance.service';
 
 // Type pour les items validés
 interface ValidatedItem {
@@ -17,6 +17,15 @@ interface ValidatedItem {
   subtotal: number;
   stockId: string;
   productName: string;
+}
+
+// Type pour la caisse avec les champs nécessaires
+interface CashRegisterInfo {
+  id: string;
+  status: string;
+  storeId: string;
+  openingAmount?: number;
+  availableAmount?: number;
 }
 
 @Injectable()
@@ -81,21 +90,39 @@ export class SaleService {
         );
       }
 
-      // Vérifier la caisse si fournie
-      if (cashRegisterId) {
-        const cashRegister = await this.prisma.cashRegister.findUnique({
+      // VÉRIFICATION OBLIGATOIRE : Caisse ouverte pour les paiements en espèces
+      let cashRegister: CashRegisterInfo | null = null;
+
+      if (paymentMethod === 'CASH') {
+        // Pour les paiements en espèces, une caisse ouverte est OBLIGATOIRE
+        if (!cashRegisterId) {
+          throw new BadRequestException(
+            'Une caisse ouverte est obligatoire pour les paiements en espèces',
+          );
+        }
+
+        const foundCashRegister = await this.prisma.cashRegister.findUnique({
           where: { id: cashRegisterId },
+          select: {
+            id: true,
+            status: true,
+            storeId: true,
+            openingAmount: true,
+            availableAmount: true,
+          },
         });
 
-        if (!cashRegister) {
+        if (!foundCashRegister) {
           throw new NotFoundException(
             `Caisse avec l'ID "${cashRegisterId}" non trouvée`,
           );
         }
 
+        cashRegister = foundCashRegister;
+
         if (cashRegister.status !== 'OPEN') {
           throw new BadRequestException(
-            'La caisse doit être ouverte pour effectuer une vente',
+            'La caisse doit être ouverte pour effectuer une vente en espèces',
           );
         }
 
@@ -104,9 +131,32 @@ export class SaleService {
             'La caisse ne correspond pas au magasin',
           );
         }
+      } else {
+        // Pour les autres méthodes de paiement, une caisse n'est pas obligatoire
+        // mais si elle est fournie, on vérifie qu'elle est valide
+        if (cashRegisterId) {
+          const foundCashRegister = await this.prisma.cashRegister.findUnique({
+            where: { id: cashRegisterId },
+            select: {
+              id: true,
+              status: true,
+              storeId: true,
+            },
+          });
+
+          if (foundCashRegister) {
+            cashRegister = foundCashRegister;
+
+            if (cashRegister.storeId !== storeId) {
+              throw new BadRequestException(
+                'La caisse ne correspond pas au magasin',
+              );
+            }
+          }
+        }
       }
 
-      // Valider et préparer les articles avec le type explicite
+      // Valider et préparer les articles
       const validatedItems: ValidatedItem[] = [];
       let subtotal = 0;
 
@@ -179,7 +229,9 @@ export class SaleService {
       // Générer le numéro de vente
       const saleNumber = await this.generateSaleNumber();
 
-      // Créer la vente dans une transaction
+      // Vérifier le type de paiement
+      const transactionType = paymentMethod === 'CASH' ? 'SALE_CASH' : `SALE_${paymentMethod}`;
+
       const sale = await this.prisma.$transaction(async (tx) => {
         // Créer la vente
         const newSale = await tx.sale.create({
@@ -237,6 +289,7 @@ export class SaleService {
               select: {
                 id: true,
                 openingAmount: true,
+                availableAmount: true,
               },
             },
           },
@@ -269,19 +322,29 @@ export class SaleService {
           });
         }
 
-        return newSale;
-      });
+        // ⭐ METTRE À JOUR LE MONTANT DISPONIBLE DE LA CAISSE SI PAIEMENT EN ESPÈCES
+        if (cashRegisterId && paymentMethod === 'CASH' && cashRegister && cashRegister.availableAmount !== undefined) {
+          const newAvailableAmount = cashRegister.availableAmount + total;
+          await tx.cashRegister.update({
+            where: { id: cashRegisterId },
+            data: {
+              availableAmount: newAvailableAmount,
+            },
+          });
+        }
 
-      if (paymentMethod !== 'CASH') {
+        // Créditer le magasin
         await this.storeFinance.creditStore(
           storeId,
           userId,
           total,
-          'SALE',
+          transactionType,
           `Vente #${saleNumber} (${paymentMethod})`,
-          sale.id,
+          newSale.id,
         );
-      }
+
+        return newSale;
+      });
 
       return {
         data: sale,
@@ -299,6 +362,138 @@ export class SaleService {
       console.error('Erreur lors de la création de la vente:', error);
       throw new BadRequestException(
         error.message || 'Une erreur est survenue lors de la création de la vente',
+      );
+    }
+  }
+
+  /**
+   * Mettre à jour le statut d'une vente
+   */
+  async updateStatus(id: string, status: SaleStatus, userId: string) {
+    try {
+      const sale = await this.prisma.sale.findUnique({
+        where: { id },
+        include: {
+          items: true,
+          cashRegister: {
+            select: {
+              id: true,
+              availableAmount: true,
+            },
+          },
+        },
+      });
+
+      if (!sale) {
+        throw new NotFoundException(`Vente avec l'ID "${id}" non trouvée`);
+      }
+
+      // Vérifier les transitions de statut autorisées
+      if (sale.status === 'REFUNDED') {
+        throw new BadRequestException(
+          'Impossible de modifier une vente déjà remboursée',
+        );
+      }
+
+      if (status === 'CANCELLED' && sale.status !== 'PENDING') {
+        throw new BadRequestException(
+          'Seules les ventes en attente peuvent être annulées',
+        );
+      }
+
+      // Si on rembourse ou annule, restaurer le stock ET rembourser l'argent
+      if (status === 'REFUNDED' || status === 'CANCELLED') {
+        await this.prisma.$transaction(async (tx) => {
+          // Mettre à jour le statut
+          await tx.sale.update({
+            where: { id },
+            data: { status },
+          });
+
+          // Restaurer les stocks
+          for (const item of sale.items) {
+            await tx.stock.updateMany({
+              where: {
+                productId: item.productId,
+                storeId: sale.storeId,
+              },
+              data: {
+                quantity: {
+                  increment: item.quantity,
+                },
+              },
+            });
+
+            // Créer un mouvement de stock de retour
+            await tx.stockMovement.create({
+              data: {
+                productId: item.productId,
+                storeId: sale.storeId,
+                userId,
+                type: 'IN',
+                quantity: item.quantity,
+                reference: sale.saleNumber,
+                notes: `${status === 'REFUNDED' ? 'Remboursement' : 'Annulation'} de vente`,
+              },
+            });
+          }
+
+          // Débiter le magasin pour les remboursements
+          if (status === 'REFUNDED') {
+            await this.storeFinance.debitStore(
+              sale.storeId,
+              userId,
+              sale.total,
+              'REFUND',
+              `Remboursement vente #${sale.saleNumber}`,
+              sale.id,
+            );
+          }
+
+          // ⭐ METTRE À JOUR LE MONTANT DISPONIBLE DE LA CAISSE SI REMBOURSEMENT EN ESPÈCES
+          if (sale.cashRegisterId && sale.paymentMethod === 'CASH' && status === 'REFUNDED') {
+            // Vérifier qu'il y a assez d'argent dans la caisse
+            if (sale.cashRegister && sale.cashRegister.availableAmount < sale.total) {
+              throw new BadRequestException(
+                `Montant insuffisant dans la caisse pour le remboursement. Disponible: ${sale.cashRegister.availableAmount} GNF, Remboursement: ${sale.total} GNF`
+              );
+            }
+
+            await tx.cashRegister.update({
+              where: { id: sale.cashRegisterId },
+              data: {
+                availableAmount: {
+                  decrement: sale.total, // ⭐ Retirer le montant remboursé
+                },
+              },
+            });
+          }
+        });
+      } else {
+        await this.prisma.sale.update({
+          where: { id },
+          data: { status },
+        });
+      }
+
+      const updatedSale = await this.findOne(id);
+
+      return {
+        data: updatedSale.data,
+        message: `Statut de la vente mis à jour vers ${status}`,
+        success: true,
+      };
+    } catch (error) {
+      if (
+        error instanceof NotFoundException ||
+        error instanceof BadRequestException
+      ) {
+        throw error;
+      }
+
+      console.error('Erreur lors de la mise à jour du statut:', error);
+      throw new BadRequestException(
+        'Une erreur est survenue lors de la mise à jour du statut',
       );
     }
   }
@@ -443,6 +638,7 @@ export class SaleService {
             select: {
               id: true,
               openingAmount: true,
+              availableAmount: true,
             },
           },
           items: {
@@ -543,101 +739,6 @@ export class SaleService {
       console.error('Erreur lors de la recherche de la vente:', error);
       throw new BadRequestException(
         'Une erreur est survenue lors de la recherche de la vente',
-      );
-    }
-  }
-
-  /**
-   * Mettre à jour le statut d'une vente
-   */
-  async updateStatus(id: string, status: SaleStatus, userId: string) {
-    try {
-      const sale = await this.prisma.sale.findUnique({
-        where: { id },
-        include: {
-          items: true,
-        },
-      });
-
-      if (!sale) {
-        throw new NotFoundException(`Vente avec l'ID "${id}" non trouvée`);
-      }
-
-      // Vérifier les transitions de statut autorisées
-      if (sale.status === 'REFUNDED') {
-        throw new BadRequestException(
-          'Impossible de modifier une vente déjà remboursée',
-        );
-      }
-
-      if (status === 'CANCELLED' && sale.status !== 'PENDING') {
-        throw new BadRequestException(
-          'Seules les ventes en attente peuvent être annulées',
-        );
-      }
-
-      // Si on rembourse ou annule, restaurer le stock
-      if (status === 'REFUNDED' || status === 'CANCELLED') {
-        await this.prisma.$transaction(async (tx) => {
-          // Mettre à jour le statut
-          await tx.sale.update({
-            where: { id },
-            data: { status },
-          });
-
-          // Restaurer les stocks
-          for (const item of sale.items) {
-            await tx.stock.updateMany({
-              where: {
-                productId: item.productId,
-                storeId: sale.storeId,
-              },
-              data: {
-                quantity: {
-                  increment: item.quantity,
-                },
-              },
-            });
-
-            // Créer un mouvement de stock de retour
-            await tx.stockMovement.create({
-              data: {
-                productId: item.productId,
-                storeId: sale.storeId,
-                userId,
-                type: 'IN',
-                quantity: item.quantity,
-                reference: sale.saleNumber,
-                notes: `${status === 'REFUNDED' ? 'Remboursement' : 'Annulation'} de vente`,
-              },
-            });
-          }
-        });
-      } else {
-        await this.prisma.sale.update({
-          where: { id },
-          data: { status },
-        });
-      }
-
-      const updatedSale = await this.findOne(id);
-
-      return {
-        data: updatedSale.data,
-        message: `Statut de la vente mis à jour vers ${status}`,
-        success: true,
-      };
-    } catch (error) {
-      if (
-        error instanceof NotFoundException ||
-        error instanceof BadRequestException
-      ) {
-        throw error;
-      }
-
-      console.error('Erreur lors de la mise à jour du statut:', error);
-      throw new BadRequestException(
-        'Une erreur est survenue lors de la mise à jour du statut',
       );
     }
   }

@@ -2,8 +2,8 @@ import {
     IsNotEmpty,
     IsString,
     IsNumber,
-    IsPositive,
     IsOptional,
+    Min,
 } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
@@ -20,19 +20,19 @@ export class OpenCashRegisterDto {
 
     @ApiProperty({
         example: 100000,
-        description: 'Montant d\'ouverture de la caisse (en GNF)',
+        description: "Montant d'ouverture de la caisse (en GNF)",
         required: true,
         minimum: 0,
     })
     @IsNotEmpty({ message: "Le montant d'ouverture est obligatoire" })
     @IsNumber({}, { message: "Le montant d'ouverture doit être un nombre" })
-    @IsPositive({ message: "Le montant d'ouverture doit être positif" })
+    @Min(0, { message: "La somme doit être au minimum 0" })
     @Type(() => Number)
     openingAmount: number;
 
     @ApiProperty({
         example: 'Ouverture de caisse du matin',
-        description: 'Notes sur l\'ouverture',
+        description: "Notes sur l'ouverture",
         required: false,
         maxLength: 500,
     })

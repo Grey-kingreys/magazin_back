@@ -12,14 +12,14 @@ import { StoreFinanceService } from 'src/common/services/store-finance.service';
 export class RevenueService {
   constructor(
     private readonly prisma: PrismaService,
-    private readonly storeFinance: StoreFinanceService,  // ⭐ INJECTER
+    private readonly storeFinance: StoreFinanceService,
   ) { }
 
   async create(createRevenueDto: CreateRevenueDto, userId: string) {
     try {
       const { storeId, category, description, amount, reference, date } = createRevenueDto;
 
-      // ⭐ NOUVEAU : Vérifier que le magasin existe
+      // Vérifier que le magasin existe
       const store = await this.prisma.store.findUnique({
         where: { id: storeId },
       });
@@ -38,7 +38,7 @@ export class RevenueService {
         const newRevenue = await tx.revenue.create({
           data: {
             userId,
-            storeId,  // ⭐ NOUVEAU
+            storeId,
             category: category.trim(),
             description: description.trim(),
             amount,
@@ -53,7 +53,7 @@ export class RevenueService {
                 email: true,
               },
             },
-            store: {  // ⭐ NOUVEAU
+            store: {
               select: {
                 id: true,
                 name: true,
@@ -88,6 +88,7 @@ export class RevenueService {
       );
     }
   }
+
 
 
   /**
