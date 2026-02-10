@@ -49,7 +49,7 @@ export class SaleService {
 
   /**
    * Créer une nouvelle vente
-   * ⭐ Met à jour automatiquement le montant disponible dans la caisse
+   * ⭐ FIX: Recherche la caisse ouverte de l'utilisateur DANS LE BON MAGASIN
    */
   async create(createSaleDto: CreateSaleDto, userId: string) {
     try {
@@ -81,13 +81,14 @@ export class SaleService {
         );
       }
 
-      // ⭐ NOUVELLE RÈGLE: Si pas de caisse fournie, chercher la caisse ouverte de l'utilisateur
+      // ⭐ FIX: Si pas de caisse fournie, chercher la caisse ouverte de l'utilisateur DANS CE MAGASIN
       let effectiveCashRegisterId = cashRegisterId;
 
       if (!effectiveCashRegisterId) {
         const userOpenCashRegister = await this.prisma.cashRegister.findFirst({
           where: {
             userId,
+            storeId,  // ⭐ FIX: Ajout du filtre par magasin
             status: 'OPEN',
           },
           select: {
@@ -98,21 +99,14 @@ export class SaleService {
 
         if (!userOpenCashRegister) {
           throw new BadRequestException(
-            `Aucune caisse ouverte trouvée. Veuillez ouvrir une caisse avant d'effectuer une vente.`,
-          );
-        }
-
-        // Vérifier que la caisse est bien dans le bon magasin
-        if (userOpenCashRegister.storeId !== storeId) {
-          throw new BadRequestException(
-            `Votre caisse ouverte est dans un autre magasin. Fermez-la ou changez de magasin.`,
+            `Aucune caisse ouverte trouvée pour le magasin "${store.name}". Veuillez ouvrir une caisse avant d'effectuer une vente.`,
           );
         }
 
         effectiveCashRegisterId = userOpenCashRegister.id;
       }
 
-      // Vérifier que la caisse existe et est ouverte
+      // Vérifier que la caisse existe, est ouverte, et appartient à l'utilisateur
       if (effectiveCashRegisterId) {
         const cashRegister = await this.prisma.cashRegister.findUnique({
           where: { id: effectiveCashRegisterId },

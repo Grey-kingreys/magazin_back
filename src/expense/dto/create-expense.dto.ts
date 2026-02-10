@@ -29,6 +29,15 @@ export class CreateExpenseDto {
     storeId: string;
 
     @ApiProperty({
+        example: 'clx7b8k9l0000xtqp9012ijkl',
+        description: 'ID de la caisse (obligatoire pour les paiements en espèces)',
+        required: false,
+    })
+    @IsOptional()
+    @IsString({ message: "L'ID de la caisse doit être une chaîne de caractères" })
+    cashRegisterId?: string;
+
+    @ApiProperty({
         example: 'Loyer',
         description: 'Catégorie de dépense (Loyer, Salaires, Électricité, Fournitures, etc.)',
         required: true,

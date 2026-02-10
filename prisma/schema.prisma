@@ -59,7 +59,6 @@ enum StoreTransactionType {
 
 // ==================== USER & AUTH ====================
 
-
 model User {
   id           String   @id @default(cuid())
   email        String   @unique
@@ -88,7 +87,6 @@ model User {
   @@index([storeId])
   @@index([resetPasswordToken])
 }
-
 
 // ==================== CATEGORIES ====================
 
@@ -186,8 +184,8 @@ model Store {
   cashRegisters  CashRegister[]
   stockMovements StockMovement[]
   expenses       Expense[]
-  revenues       Revenue[]              // ⭐ AJOUTER CETTE LIGNE
-  storeTransactions StoreTransaction[]  // ⭐ AJOUTER CETTE LIGNE
+  revenues       Revenue[]
+  storeTransactions StoreTransaction[]
 
   @@index([name])
 }
@@ -346,9 +344,10 @@ model CashRegister {
   closedAt      DateTime?
 
   // Relations
-  store Store  @relation(fields: [storeId], references: [id])
-  user  User   @relation(fields: [userId], references: [id])
-  sales Sale[]
+  store    Store     @relation(fields: [storeId], references: [id])
+  user     User      @relation(fields: [userId], references: [id])
+  sales    Sale[]
+  expenses Expense[] // ⭐ NOUVELLE RELATION
 
   @@index([storeId])
   @@index([userId])
@@ -362,6 +361,7 @@ model Expense {
   id          String   @id @default(cuid())
   storeId     String
   userId      String
+  cashRegisterId String? // ⭐ NOUVEAU CHAMP
   
   category    String   // Loyer, Salaires, Électricité, etc.
   description String
@@ -376,9 +376,11 @@ model Expense {
   // Relations
   store Store @relation(fields: [storeId], references: [id])
   user  User  @relation(fields: [userId], references: [id])
+  cashRegister CashRegister? @relation(fields: [cashRegisterId], references: [id]) // ⭐ NOUVELLE RELATION
 
   @@index([storeId])
   @@index([userId])
+  @@index([cashRegisterId]) // ⭐ NOUVEL INDEX
   @@index([category])
   @@index([date])
 }
@@ -388,7 +390,7 @@ model Expense {
 model Revenue {
   id          String   @id @default(cuid())
   userId      String
-  storeId     String   // ⭐ Champ ajouté
+  storeId     String
   
   category    String
   description String

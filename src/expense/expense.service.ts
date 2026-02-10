@@ -7,20 +7,23 @@ import { PrismaService } from 'src/common/services/prisma.service';
 import { CreateExpenseDto } from './dto/create-expense.dto';
 import { UpdateExpenseDto } from './dto/update-expense.dto';
 import { StoreFinanceService } from 'src/common/services/store-finance.service';
+import { CashRegisterService } from 'src/cash-register/cash-register.service';
 
 @Injectable()
 export class ExpenseService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly storeFinance: StoreFinanceService,
+    private readonly cashRegisterService: CashRegisterService,
   ) { }
 
   /**
    * Créer une nouvelle dépense
+   * ⭐ Gère automatiquement les caisses pour les paiements en espèces
    */
   async create(createExpenseDto: CreateExpenseDto, userId: string) {
     try {
-      const { storeId, category, description, amount, reference, paymentMethod, date } = createExpenseDto;
+      const { storeId, category, description, amount, reference, paymentMethod, date, cashRegisterId } = createExpenseDto;
 
       // Vérifier que le magasin existe
       const store = await this.prisma.store.findUnique({
@@ -46,41 +49,82 @@ export class ExpenseService {
         );
       }
 
-      // ====== NOUVELLE FONCTIONNALITÉ : GESTION DES DÉPENSES EN ESPÈCES ======
-      // Si c'est une dépense en espèces, vérifier s'il y a une caisse ouverte
-      let cashRegisterId = "";
+      // ⭐ GESTION DES DÉPENSES EN ESPÈCES
+      let effectiveCashRegisterId = cashRegisterId;
+      let enhancedDescription = description;
+
       if (paymentMethod === 'CASH') {
-        // Chercher une caisse ouverte dans ce magasin
-        const openCashRegister = await this.prisma.cashRegister.findFirst({
-          where: {
-            storeId,
-            status: 'OPEN',
-          },
-          select: {
-            id: true,
-            userId: true,
-            store: {
-              select: {
-                name: true,
+        // Si une caisse est fournie, vérifier qu'elle est valide
+        if (effectiveCashRegisterId) {
+          const specifiedCashRegister = await this.prisma.cashRegister.findUnique({
+            where: { id: effectiveCashRegisterId },
+            select: {
+              id: true,
+              status: true,
+              userId: true,
+              storeId: true,
+              user: {
+                select: {
+                  name: true,
+                },
               },
             },
-          },
-        });
+          });
 
-        if (!openCashRegister) {
-          throw new BadRequestException(
-            `Aucune caisse ouverte dans le magasin "${store.name}" pour effectuer un paiement en espèces. ` +
-            `Ouvrez une caisse d'abord ou utilisez un autre mode de paiement.`
-          );
+          if (!specifiedCashRegister) {
+            throw new NotFoundException(
+              `Caisse avec l'ID "${effectiveCashRegisterId}" non trouvée`
+            );
+          }
+
+          if (specifiedCashRegister.status !== 'OPEN') {
+            throw new BadRequestException(
+              `La caisse spécifiée est fermée. Veuillez choisir une caisse ouverte.`
+            );
+          }
+
+          if (specifiedCashRegister.storeId !== storeId) {
+            throw new BadRequestException(
+              `La caisse spécifiée n'appartient pas au magasin "${store.name}"`
+            );
+          }
+
+          if (specifiedCashRegister.userId !== userId) {
+            throw new BadRequestException(
+              `La caisse spécifiée appartient à ${specifiedCashRegister.user.name}. Vous ne pouvez utiliser que votre propre caisse.`
+            );
+          }
+        } else {
+          // Si pas de caisse fournie, chercher la caisse ouverte de l'utilisateur dans ce magasin
+          const userOpenCashRegister = await this.prisma.cashRegister.findFirst({
+            where: {
+              userId,
+              storeId,
+              status: 'OPEN',
+            },
+            select: {
+              id: true,
+              user: {
+                select: {
+                  name: true,
+                },
+              },
+            },
+          });
+
+          if (!userOpenCashRegister) {
+            throw new BadRequestException(
+              `Aucune caisse ouverte trouvée dans le magasin "${store.name}" pour un paiement en espèces. ` +
+              `Ouvrez une caisse d'abord ou utilisez un autre mode de paiement.`
+            );
+          }
+
+          effectiveCashRegisterId = userOpenCashRegister.id;
         }
 
-        cashRegisterId = openCashRegister.id;
-
-        // Noter dans la description que c'est payé depuis une caisse spécifique
-        const enhancedDescription = `${description} [Payé depuis caisse de ${openCashRegister.userId}]`;
-        createExpenseDto.description = enhancedDescription;
+        // Ajouter une note dans la description
+        enhancedDescription = `${description} [Payé en espèces depuis votre caisse]`;
       }
-      // ====== FIN DE LA NOUVELLE FONCTIONNALITÉ ======
 
       // Créer la dépense ET débiter le magasin dans une transaction
       const expense = await this.prisma.$transaction(async (tx) => {
@@ -89,8 +133,9 @@ export class ExpenseService {
           data: {
             storeId,
             userId,
+            cashRegisterId: effectiveCashRegisterId || null,
             category: category.trim(),
-            description: createExpenseDto.description.trim(), // Utiliser la description potentiellement modifiée
+            description: enhancedDescription.trim(),
             amount,
             reference: reference?.trim() || null,
             paymentMethod: paymentMethod || null,
@@ -111,6 +156,11 @@ export class ExpenseService {
                 email: true,
               },
             },
+            cashRegister: {
+              select: {
+                id: true,
+              },
+            },
           },
         });
 
@@ -127,9 +177,26 @@ export class ExpenseService {
         return newExpense;
       });
 
+      // ⭐ 3. Mettre à jour le montant disponible dans la caisse (si paiement en espèces)
+      if (effectiveCashRegisterId && paymentMethod === 'CASH') {
+        try {
+          await this.cashRegisterService.updateAvailableAmount(
+            effectiveCashRegisterId,
+            amount,
+            'SUBTRACT',
+            `Dépense: ${category}`,
+          );
+        } catch (error) {
+          console.warn(
+            '⚠️ Erreur lors de la mise à jour de la caisse, mais dépense créée:',
+            error,
+          );
+        }
+      }
+
       return {
         data: expense,
-        message: 'Dépense enregistrée avec succès',
+        message: `Dépense enregistrée avec succès${effectiveCashRegisterId && paymentMethod === 'CASH' ? '. Caisse mise à jour.' : ''}`,
         success: true,
       };
     } catch (error) {
@@ -232,6 +299,11 @@ export class ExpenseService {
                 email: true,
               },
             },
+            cashRegister: {
+              select: {
+                id: true,
+              },
+            },
           },
         }),
         this.prisma.expense.count({ where }),
@@ -285,6 +357,12 @@ export class ExpenseService {
               role: true,
             },
           },
+          cashRegister: {
+            select: {
+              id: true,
+              status: true,
+            },
+          },
         },
       });
 
@@ -311,6 +389,7 @@ export class ExpenseService {
 
   /**
    * Mettre à jour une dépense
+   * ⚠️ Note: La mise à jour ne modifie PAS les caisses (pour éviter les incohérences)
    */
   async update(id: string, updateExpenseDto: UpdateExpenseDto) {
     try {
@@ -342,7 +421,7 @@ export class ExpenseService {
         }
       }
 
-      // Mettre à jour la dépense
+      // Mettre à jour la dépense (sans toucher aux caisses)
       const updatedExpense = await this.prisma.expense.update({
         where: { id },
         data: {
@@ -353,6 +432,7 @@ export class ExpenseService {
           reference: updateExpenseDto.reference?.trim() || undefined,
           paymentMethod: updateExpenseDto.paymentMethod,
           date: updateExpenseDto.date,
+          // ⚠️ cashRegisterId n'est PAS modifiable pour éviter les incohérences
         },
         include: {
           store: {
@@ -367,6 +447,11 @@ export class ExpenseService {
               id: true,
               name: true,
               email: true,
+            },
+          },
+          cashRegister: {
+            select: {
+              id: true,
             },
           },
         },
@@ -395,18 +480,44 @@ export class ExpenseService {
 
   /**
    * Supprimer une dépense
+   * ⭐ Restaure l'argent dans la caisse si c'était un paiement en espèces
    */
   async remove(id: string) {
     try {
       const expense = await this.prisma.expense.findUnique({
         where: { id },
+        include: {
+          cashRegister: {
+            select: {
+              id: true,
+              status: true,
+            },
+          },
+        },
       });
 
       if (!expense) {
         throw new NotFoundException(`Dépense avec l'ID "${id}" non trouvée`);
       }
 
-      // Si la dépense a été débitée, créditer le magasin pour annuler
+      // ⭐ Si la dépense a été débitée d'une caisse ouverte, créditer la caisse
+      if (expense.cashRegisterId && expense.cashRegister?.status === 'OPEN') {
+        try {
+          await this.cashRegisterService.updateAvailableAmount(
+            expense.cashRegisterId,
+            expense.amount,
+            'ADD',
+            `Annulation dépense: ${expense.category}`,
+          );
+        } catch (error) {
+          console.warn(
+            '⚠️ Erreur lors de la restauration de l\'argent dans la caisse:',
+            error,
+          );
+        }
+      }
+
+      // Créditer le magasin pour annuler le débit
       if (expense.amount > 0) {
         await this.storeFinance.creditStore(
           expense.storeId,
@@ -418,13 +529,14 @@ export class ExpenseService {
         );
       }
 
+      // Supprimer la dépense
       await this.prisma.expense.delete({
         where: { id },
       });
 
       return {
         data: { id },
-        message: 'Dépense supprimée avec succès',
+        message: `Dépense supprimée avec succès${expense.cashRegisterId && expense.cashRegister?.status === 'OPEN' ? '. Caisse mise à jour.' : ''}`,
         success: true,
       };
     } catch (error) {
