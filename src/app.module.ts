@@ -14,6 +14,7 @@ import { StockModule } from './stock/stock.module';
 import { StoreModule } from './store/store.module';
 import { ProductModule } from './product/product.module';
 import { SupplierModule } from './supplier/supplier.module';
+import { PurchaseModule } from './purchase/purchase.module';
 
 @Module({
   imports: [
@@ -33,7 +34,8 @@ import { SupplierModule } from './supplier/supplier.module';
     ExpenseModule,
     RevenueModule,
     DashboardModule,
-    ReportModule
+    ReportModule,
+    PurchaseModule
   ],
   controllers: [],
   providers: [],

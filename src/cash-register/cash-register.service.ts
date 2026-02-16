@@ -138,6 +138,7 @@ export class CashRegisterService {
             select: {
               id: true,
               name: true,
+              role: true,
             },
           },
           sales: {
@@ -513,6 +514,7 @@ export class CashRegisterService {
                 id: true,
                 name: true,
                 city: true,
+                users : true
               },
             },
             user: {

@@ -81,6 +81,7 @@ model User {
   stockMovements StockMovement[]
   expenses       Expense[]
   revenues       Revenue[]
+  purchases      Purchase[]
   storeTransactions StoreTransaction[]
 
   @@index([email])
@@ -119,7 +120,8 @@ model Supplier {
   updatedAt   DateTime  @updatedAt
 
   // Relations
-  products Product[]
+  products  Product[]
+  purchases Purchase[]
 
   @@index([name])
 }
@@ -134,6 +136,7 @@ model Product {
   sku         String   @unique // Stock Keeping Unit
   categoryId  String
   supplierId  String?
+  storeId     String   
   
   // Prix
   costPrice   Float    // Prix d'achat
@@ -152,6 +155,7 @@ model Product {
   supplier       Supplier?       @relation(fields: [supplierId], references: [id])
   stocks         Stock[]
   saleItems      SaleItem[]
+  purchaseItems  PurchaseItem[]
   stockMovements StockMovement[]
 
   @@index([barcode])
@@ -181,6 +185,7 @@ model Store {
   users          User[]
   stocks         Stock[]
   sales          Sale[]
+  purchases      Purchase[]
   cashRegisters  CashRegister[]
   stockMovements StockMovement[]
   expenses       Expense[]
@@ -190,14 +195,14 @@ model Store {
   @@index([name])
 }
 
-// ⭐ NOUVEAU : Table pour tracker tous les mouvements d'argent
+// ⭐ Table pour tracker tous les mouvements d'argent
 model StoreTransaction {
   id          String   @id @default(cuid())
   storeId     String
   userId      String
   
   type        StoreTransactionType
-  category    String  // SALE, EXPENSE, REVENUE, CASH_REGISTER_OPEN, CASH_REGISTER_CLOSE
+  category    String  // SALE, EXPENSE, REVENUE, PURCHASE, CASH_REGISTER_OPEN, CASH_REGISTER_CLOSE
   amount      Float
   
   balanceBefore Float
@@ -266,6 +271,52 @@ model StockMovement {
   @@index([userId])
   @@index([type])
   @@index([createdAt])
+}
+
+// ==================== PURCHASES (ACHATS) ====================
+
+model Purchase {
+  id              String   @id @default(cuid())
+  purchaseNumber  String   @unique
+  supplierId      String
+  storeId         String
+  userId          String
+  totalAmount     Float
+  invoiceNumber   String?
+  notes           String?
+  purchaseDate    DateTime @default(now())
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  
+  // Relations
+  supplier Supplier       @relation(fields: [supplierId], references: [id])
+  store    Store          @relation(fields: [storeId], references: [id])
+  user     User           @relation(fields: [userId], references: [id])
+  items    PurchaseItem[]
+  
+  @@index([purchaseNumber])
+  @@index([supplierId])
+  @@index([storeId])
+  @@index([userId])
+  @@index([purchaseDate])
+  @@index([createdAt])
+}
+
+model PurchaseItem {
+  id         String   @id @default(cuid())
+  purchaseId String
+  productId  String
+  quantity   Int
+  unitPrice  Float
+  subtotal   Float
+  createdAt  DateTime @default(now())
+  
+  // Relations
+  purchase Purchase @relation(fields: [purchaseId], references: [id], onDelete: Cascade)
+  product  Product  @relation(fields: [productId], references: [id])
+  
+  @@index([purchaseId])
+  @@index([productId])
 }
 
 // ==================== SALES (POS) ====================
@@ -347,7 +398,7 @@ model CashRegister {
   store    Store     @relation(fields: [storeId], references: [id])
   user     User      @relation(fields: [userId], references: [id])
   sales    Sale[]
-  expenses Expense[] // ⭐ NOUVELLE RELATION
+  expenses Expense[]
 
   @@index([storeId])
   @@index([userId])
@@ -361,7 +412,7 @@ model Expense {
   id          String   @id @default(cuid())
   storeId     String
   userId      String
-  cashRegisterId String? // ⭐ NOUVEAU CHAMP
+  cashRegisterId String?
   
   category    String   // Loyer, Salaires, Électricité, etc.
   description String
@@ -376,11 +427,11 @@ model Expense {
   // Relations
   store Store @relation(fields: [storeId], references: [id])
   user  User  @relation(fields: [userId], references: [id])
-  cashRegister CashRegister? @relation(fields: [cashRegisterId], references: [id]) // ⭐ NOUVELLE RELATION
+  cashRegister CashRegister? @relation(fields: [cashRegisterId], references: [id])
 
   @@index([storeId])
   @@index([userId])
-  @@index([cashRegisterId]) // ⭐ NOUVEL INDEX
+  @@index([cashRegisterId])
   @@index([category])
   @@index([date])
 }
