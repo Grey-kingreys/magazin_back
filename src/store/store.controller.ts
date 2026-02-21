@@ -10,6 +10,7 @@ import {
   Query,
   ParseIntPipe,
   DefaultValuePipe,
+  Req,
 } from '@nestjs/common';
 import {
   ApiTags,
@@ -25,6 +26,7 @@ import { UpdateStoreDto } from './dto/update-store.dto';
 import { AuthGuard } from 'src/common/guards/auth.guard';
 import { RolesGuard } from 'src/common/guards/roles.guard';
 import { Roles } from 'src/common/decorators/roles.decorator';
+import { RequestWithUser } from 'src/auth/jwt.strategy';
 
 @ApiTags('Magasins')
 @Controller('store')
@@ -70,63 +72,61 @@ export class StoreController {
    * Récupérer tous les magasins
    */
   @Get()
-  @Roles('ADMIN', 'MANAGER')
+  @Roles('ADMIN', 'MANAGER', 'STORE_MANAGER', 'CASHIER')
   @ApiOperation({
     summary: 'Liste des magasins',
     description:
-      'Récupère la liste de tous les magasins avec pagination et filtres',
+      'Récupère la liste des magasins avec pagination et filtres. ADMIN et MANAGER voient tous les magasins, STORE_MANAGER et CASHIER voient uniquement leur magasin assigné.',
   })
   @ApiQuery({
     name: 'page',
     required: false,
-    description: 'Numéro de la page',
+    type: Number,
     example: 1,
+    description: 'Numéro de la page',
   })
   @ApiQuery({
     name: 'limit',
     required: false,
-    description: "Nombre d'éléments par page",
+    type: Number,
     example: 50,
+    description: 'Nombre d\'éléments par page',
   })
   @ApiQuery({
     name: 'search',
     required: false,
-    description: 'Rechercher dans nom, email, téléphone, ville ou adresse',
-    example: 'Central',
+    type: String,
+    description: 'Recherche par nom, ville ou adresse',
   })
   @ApiQuery({
     name: 'isActive',
     required: false,
+    type: Boolean,
     description: 'Filtrer par statut actif/inactif',
-    example: true,
-  })
-  @ApiQuery({
-    name: 'city',
-    required: false,
-    description: 'Filtrer par ville',
-    example: 'Conakry',
   })
   @ApiResponse({
     status: 200,
-    description: 'Liste des magasins récupérée',
+    description: 'Liste des magasins récupérée avec succès',
   })
   @ApiResponse({
-    status: 401,
-    description: 'Non authentifié',
-  })
-  @ApiResponse({
-    status: 403,
-    description: 'Accès refusé - Rôle ADMIN ou MANAGER requis',
+    status: 400,
+    description: 'Paramètres invalides',
   })
   findAll(
     @Query('page', new DefaultValuePipe(1), ParseIntPipe) page: number,
     @Query('limit', new DefaultValuePipe(50), ParseIntPipe) limit: number,
     @Query('search') search?: string,
-    @Query('isActive', new DefaultValuePipe(undefined))
-    isActive?: boolean,
-    @Query('city') city?: string,
+    @Query('isActive') isActive?: boolean,
+    @Req() request?: RequestWithUser,
   ) {
-    return this.storeService.findAll(page, limit, search, isActive, city);
+    return this.storeService.findAll(
+      page,
+      limit,
+      search,
+      isActive,
+      request?.user.userId,
+      request?.user.role,
+    );
   }
 
   /**
@@ -183,34 +183,30 @@ export class StoreController {
    * Récupérer un magasin par ID
    */
   @Get(':id')
-  @Roles('ADMIN', 'MANAGER', 'STORE_MANAGER')
+  @Roles('ADMIN', 'MANAGER', 'STORE_MANAGER', 'CASHIER')
   @ApiOperation({
-    summary: "Détails d'un magasin",
-    description: "Récupère les détails d'un magasin spécifique",
-  })
-  @ApiParam({
-    name: 'id',
-    description: 'ID du magasin',
-    example: 'clx7b8k9l0000xtqp1234abcd',
+    summary: 'Détails d\'un magasin',
+    description:
+      'Récupère les détails d\'un magasin spécifique. STORE_MANAGER et CASHIER ne peuvent consulter que leur propre magasin.',
   })
   @ApiResponse({
     status: 200,
     description: 'Magasin trouvé',
   })
   @ApiResponse({
-    status: 401,
-    description: 'Non authentifié',
-  })
-  @ApiResponse({
     status: 403,
-    description: 'Accès refusé - Rôle ADMIN, MANAGER ou STORE_MANAGER requis',
+    description: 'Vous n\'avez pas la permission de consulter ce magasin',
   })
   @ApiResponse({
     status: 404,
     description: 'Magasin non trouvé',
   })
-  findOne(@Param('id') id: string) {
-    return this.storeService.findOne(id);
+  findOne(@Param('id') id: string, @Req() request: RequestWithUser) {
+    return this.storeService.findOne(
+      id,
+      request.user.userId,
+      request.user.role,
+    );
   }
 
   /**
@@ -317,15 +313,11 @@ export class StoreController {
    * Mettre à jour un magasin
    */
   @Patch(':id')
-  @Roles('ADMIN', 'MANAGER')
+  @Roles('ADMIN', 'MANAGER', 'STORE_MANAGER')
   @ApiOperation({
     summary: 'Modifier un magasin',
-    description: "Met à jour les informations d'un magasin",
-  })
-  @ApiParam({
-    name: 'id',
-    description: 'ID du magasin',
-    example: 'clx7b8k9l0000xtqp1234abcd',
+    description:
+      'Met à jour les informations d\'un magasin. ADMIN et MANAGER peuvent modifier tous les magasins, STORE_MANAGER ne peut modifier que son propre magasin.',
   })
   @ApiResponse({
     status: 200,
@@ -336,12 +328,8 @@ export class StoreController {
     description: 'Données invalides',
   })
   @ApiResponse({
-    status: 401,
-    description: 'Non authentifié',
-  })
-  @ApiResponse({
     status: 403,
-    description: 'Accès refusé - Rôle ADMIN ou MANAGER requis',
+    description: 'Vous ne pouvez modifier que votre propre magasin',
   })
   @ApiResponse({
     status: 404,
@@ -349,44 +337,50 @@ export class StoreController {
   })
   @ApiResponse({
     status: 409,
-    description: 'Un autre magasin avec ce nom ou cet email existe déjà',
+    description: 'Un autre magasin avec ce nom existe déjà',
   })
-  update(@Param('id') id: string, @Body() updateStoreDto: UpdateStoreDto) {
-    return this.storeService.update(id, updateStoreDto);
+  update(
+    @Param('id') id: string,
+    @Body() updateStoreDto: UpdateStoreDto,
+    @Req() request: RequestWithUser,
+  ) {
+    return this.storeService.update(
+      id,
+      updateStoreDto,
+      request.user.userId,
+      request.user.role,
+    );
   }
 
   /**
    * Activer/Désactiver un magasin
    */
   @Patch(':id/toggle-active')
-  @Roles('ADMIN')
+  @Roles('ADMIN', 'MANAGER')
   @ApiOperation({
     summary: 'Activer/Désactiver un magasin',
-    description: 'Change le statut actif/inactif du magasin',
-  })
-  @ApiParam({
-    name: 'id',
-    description: 'ID du magasin',
-    example: 'clx7b8k9l0000xtqp1234abcd',
+    description:
+      'Change le statut actif/inactif d\'un magasin. Réservé aux ADMIN et MANAGER.',
   })
   @ApiResponse({
     status: 200,
-    description: 'Statut du magasin changé avec succès',
-  })
-  @ApiResponse({
-    status: 401,
-    description: 'Non authentifié',
+    description: 'Statut du magasin modifié avec succès',
   })
   @ApiResponse({
     status: 403,
-    description: 'Accès refusé - Rôle ADMIN requis',
+    description:
+      'Seuls les administrateurs et managers peuvent activer/désactiver un magasin',
   })
   @ApiResponse({
     status: 404,
     description: 'Magasin non trouvé',
   })
-  toggleActive(@Param('id') id: string) {
-    return this.storeService.toggleActive(id);
+  toggleActive(@Param('id') id: string, @Req() request: RequestWithUser) {
+    return this.storeService.toggleActive(
+      id,
+      request.user.userId,
+      request.user.role,
+    );
   }
 
   /**
@@ -397,24 +391,15 @@ export class StoreController {
   @ApiOperation({
     summary: 'Supprimer un magasin',
     description:
-      'Supprime un magasin (uniquement si aucune donnée associée)',
-  })
-  @ApiParam({
-    name: 'id',
-    description: 'ID du magasin',
-    example: 'clx7b8k9l0000xtqp1234abcd',
+      'Supprime un magasin (uniquement si vide : sans utilisateurs, stocks ou ventes). Réservé exclusivement aux ADMIN.',
   })
   @ApiResponse({
     status: 200,
     description: 'Magasin supprimé avec succès',
   })
   @ApiResponse({
-    status: 401,
-    description: 'Non authentifié',
-  })
-  @ApiResponse({
     status: 403,
-    description: 'Accès refusé - Rôle ADMIN requis',
+    description: 'Seuls les administrateurs peuvent supprimer un magasin',
   })
   @ApiResponse({
     status: 404,
@@ -423,9 +408,13 @@ export class StoreController {
   @ApiResponse({
     status: 409,
     description:
-      'Impossible de supprimer un magasin avec des données associées',
+      'Impossible de supprimer ce magasin car il contient des données (utilisateurs, stocks, ventes)',
   })
-  remove(@Param('id') id: string) {
-    return this.storeService.remove(id);
+  remove(@Param('id') id: string, @Req() request: RequestWithUser) {
+    return this.storeService.remove(
+      id,
+      request.user.userId,
+      request.user.role,
+    );
   }
 }

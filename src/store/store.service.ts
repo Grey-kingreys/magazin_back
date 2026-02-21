@@ -3,6 +3,7 @@ import {
   NotFoundException,
   ConflictException,
   BadRequestException,
+  ForbiddenException,
 } from '@nestjs/common';
 import { PrismaService } from 'src/common/services/prisma.service';
 import { CreateStoreDto } from './dto/create-store.dto';
@@ -93,38 +94,55 @@ export class StoreService {
   }
 
   /**
-   * Récupérer tous les magasins avec pagination et filtres
+   * ⭐ MODIFIÉ: Récupérer tous les magasins avec filtrage par rôle
    */
   async findAll(
     page = 1,
     limit = 50,
     search?: string,
     isActive?: boolean,
-    city?: string,
+    userId?: string,
+    userRole?: string,
   ) {
     try {
       const skip = (page - 1) * limit;
 
-      // Construction de la clause where
       const where: any = {};
+
+      // ⭐ FILTRAGE PAR RÔLE
+      if (userRole !== 'ADMIN' && userRole !== 'MANAGER') {
+        // STORE_MANAGER et CASHIER ne voient que leur magasin
+        const user = await this.prisma.user.findUnique({
+          where: { id: userId },
+          select: { storeId: true },
+        });
+
+        if (!user?.storeId) {
+          // Si l'utilisateur n'a pas de magasin assigné
+          return {
+            data: {
+              stores: [],
+              pagination: {
+                total: 0,
+                page,
+                limit,
+                totalPages: 0,
+                hasMore: false,
+              },
+            },
+            message: 'Aucun magasin assigné à votre compte',
+            success: true,
+          };
+        }
+
+        where.id = user.storeId;
+      }
 
       // Filtre de recherche
       if (search) {
         where.OR = [
           {
             name: {
-              contains: search,
-              mode: 'insensitive',
-            },
-          },
-          {
-            email: {
-              contains: search,
-              mode: 'insensitive',
-            },
-          },
-          {
-            phone: {
               contains: search,
               mode: 'insensitive',
             },
@@ -144,20 +162,11 @@ export class StoreService {
         ];
       }
 
-      // Filtre par statut actif/inactif
+      // Filtre par statut
       if (isActive !== undefined) {
         where.isActive = isActive;
       }
 
-      // Filtre par ville
-      if (city) {
-        where.city = {
-          equals: city,
-          mode: 'insensitive',
-        };
-      }
-
-      // Récupération des magasins avec comptage
       const [stores, total] = await Promise.all([
         this.prisma.store.findMany({
           where,
@@ -203,10 +212,11 @@ export class StoreService {
     }
   }
 
+
   /**
-   * Récupérer un magasin par son ID
+   * ⭐ MODIFIÉ: Récupérer un magasin par ID avec vérification de permission
    */
-  async findOne(id: string) {
+  async findOne(id: string, userId?: string, userRole?: string) {
     try {
       const store = await this.prisma.store.findUnique({
         where: { id },
@@ -216,8 +226,7 @@ export class StoreService {
               users: true,
               stocks: true,
               sales: true,
-              cashRegisters: true,
-              stockMovements: true,
+              purchases: true,
               expenses: true,
             },
           },
@@ -225,9 +234,21 @@ export class StoreService {
       });
 
       if (!store) {
-        throw new NotFoundException(
-          `Magasin avec l'ID "${id}" non trouvé`,
-        );
+        throw new NotFoundException(`Magasin avec l'ID "${id}" non trouvé`);
+      }
+
+      // ⭐ VÉRIFICATION DES PERMISSIONS
+      if (userRole !== 'ADMIN' && userRole !== 'MANAGER') {
+        const user = await this.prisma.user.findUnique({
+          where: { id: userId },
+          select: { storeId: true },
+        });
+
+        if (user?.storeId !== id) {
+          throw new ForbiddenException(
+            'Vous n\'avez pas la permission de consulter ce magasin',
+          );
+        }
       }
 
       return {
@@ -236,7 +257,7 @@ export class StoreService {
         success: true,
       };
     } catch (error) {
-      if (error instanceof NotFoundException) {
+      if (error instanceof NotFoundException || error instanceof ForbiddenException) {
         throw error;
       }
 
@@ -247,19 +268,40 @@ export class StoreService {
     }
   }
 
+
   /**
-   * Mettre à jour un magasin
+   * ⭐ MODIFIÉ: Mettre à jour un magasin avec vérification de permission
    */
-  async update(id: string, updateStoreDto: UpdateStoreDto) {
+  async update(
+    id: string,
+    updateStoreDto: UpdateStoreDto,
+    userId: string,
+    userRole: string,
+  ) {
     try {
-      // Vérifier que le magasin existe
       const existingStore = await this.prisma.store.findUnique({
         where: { id },
       });
 
       if (!existingStore) {
-        throw new NotFoundException(
-          `Magasin avec l'ID "${id}" non trouvé`,
+        throw new NotFoundException(`Magasin avec l'ID "${id}" non trouvé`);
+      }
+
+      // ⭐ VÉRIFICATION DES PERMISSIONS
+      if (userRole === 'STORE_MANAGER') {
+        const user = await this.prisma.user.findUnique({
+          where: { id: userId },
+          select: { storeId: true },
+        });
+
+        if (user?.storeId !== id) {
+          throw new ForbiddenException(
+            'Vous ne pouvez modifier que votre propre magasin',
+          );
+        }
+      } else if (userRole === 'CASHIER') {
+        throw new ForbiddenException(
+          'Vous n\'avez pas la permission de modifier un magasin',
         );
       }
 
@@ -284,41 +326,20 @@ export class StoreService {
         }
       }
 
-      // Si l'email est modifié, vérifier qu'il n'existe pas déjà
-      if (updateStoreDto.email) {
-        const storeWithSameEmail = await this.prisma.store.findFirst({
-          where: {
-            email: {
-              equals: updateStoreDto.email,
-              mode: 'insensitive',
-            },
-            NOT: {
-              id,
-            },
-          },
-        });
-
-        if (storeWithSameEmail) {
-          throw new ConflictException(`Cet email est déjà utilisé`);
-        }
-      }
-
-      // Mettre à jour le magasin
       const updatedStore = await this.prisma.store.update({
         where: { id },
         data: {
           name: updateStoreDto.name?.trim(),
-          email: updateStoreDto.email?.trim().toLowerCase() || undefined,
-          phone: updateStoreDto.phone?.trim() || undefined,
           address: updateStoreDto.address?.trim() || undefined,
           city: updateStoreDto.city?.trim() || undefined,
+          phone: updateStoreDto.phone?.trim() || undefined,
+          email: updateStoreDto.email?.trim().toLowerCase() || undefined,
         },
         include: {
           _count: {
             select: {
               users: true,
               stocks: true,
-              sales: true,
             },
           },
         },
@@ -332,15 +353,15 @@ export class StoreService {
     } catch (error) {
       if (
         error instanceof NotFoundException ||
-        error instanceof ConflictException
+        error instanceof ConflictException ||
+        error instanceof ForbiddenException
       ) {
         throw error;
       }
 
       console.error('Erreur lors de la mise à jour du magasin:', error);
       throw new BadRequestException(
-        error.message ||
-        'Une erreur est survenue lors de la mise à jour du magasin',
+        error.message || 'Une erreur est survenue lors de la mise à jour du magasin',
       );
     }
   }
@@ -348,16 +369,21 @@ export class StoreService {
   /**
    * Activer/Désactiver un magasin
    */
-  async toggleActive(id: string) {
+  async toggleActive(id: string, userId: string, userRole: string) {
     try {
+      // ⭐ VÉRIFICATION: Seuls ADMIN et MANAGER peuvent activer/désactiver
+      if (userRole !== 'ADMIN' && userRole !== 'MANAGER') {
+        throw new ForbiddenException(
+          'Seuls les administrateurs et managers peuvent activer/désactiver un magasin',
+        );
+      }
+
       const store = await this.prisma.store.findUnique({
         where: { id },
       });
 
       if (!store) {
-        throw new NotFoundException(
-          `Magasin avec l'ID "${id}" non trouvé`,
-        );
+        throw new NotFoundException(`Magasin avec l'ID "${id}" non trouvé`);
       }
 
       const updatedStore = await this.prisma.store.update({
@@ -370,7 +396,6 @@ export class StoreService {
             select: {
               users: true,
               stocks: true,
-              sales: true,
             },
           },
         },
@@ -382,26 +407,30 @@ export class StoreService {
         success: true,
       };
     } catch (error) {
-      if (error instanceof NotFoundException) {
+      if (error instanceof NotFoundException || error instanceof ForbiddenException) {
         throw error;
       }
 
-      console.error(
-        'Erreur lors du changement de statut du magasin:',
-        error,
-      );
+      console.error('Erreur lors du changement de statut du magasin:', error);
       throw new BadRequestException(
         'Une erreur est survenue lors du changement de statut',
       );
     }
   }
 
+
   /**
-   * Supprimer un magasin
+   * ⭐ MODIFIÉ: Supprimer un magasin (ADMIN uniquement)
    */
-  async remove(id: string) {
+  async remove(id: string, userId: string, userRole: string) {
     try {
-      // Vérifier que le magasin existe
+      // ⭐ VÉRIFICATION DU RÔLE ADMIN
+      if (userRole !== 'ADMIN') {
+        throw new ForbiddenException(
+          'Seuls les administrateurs peuvent supprimer un magasin',
+        );
+      }
+
       const store = await this.prisma.store.findUnique({
         where: { id },
         include: {
@@ -410,50 +439,36 @@ export class StoreService {
               users: true,
               stocks: true,
               sales: true,
-              cashRegisters: true,
-              stockMovements: true,
-              expenses: true,
             },
           },
         },
       });
 
       if (!store) {
-        throw new NotFoundException(
-          `Magasin avec l'ID "${id}" non trouvé`,
-        );
+        throw new NotFoundException(`Magasin avec l'ID "${id}" non trouvé`);
       }
 
-      // Vérifier qu'il n'a pas de données associées
-      const totalRelations =
-        store._count.users +
-        store._count.stocks +
-        store._count.sales +
-        store._count.cashRegisters +
-        store._count.stockMovements +
-        store._count.expenses;
-
-      if (totalRelations > 0) {
-        const details: string[] = [];
-        if (store._count.users > 0)
-          details.push(`${store._count.users} utilisateur(s)`);
-        if (store._count.stocks > 0)
-          details.push(`${store._count.stocks} stock(s)`);
-        if (store._count.sales > 0)
-          details.push(`${store._count.sales} vente(s)`);
-        if (store._count.cashRegisters > 0)
-          details.push(`${store._count.cashRegisters} caisse(s)`);
-        if (store._count.stockMovements > 0)
-          details.push(`${store._count.stockMovements} mouvement(s)`);
-        if (store._count.expenses > 0)
-          details.push(`${store._count.expenses} dépense(s)`);
-
+      // Vérifier qu'il n'a pas d'utilisateurs assignés
+      if (store._count.users > 0) {
         throw new ConflictException(
-          `Impossible de supprimer ce magasin car il contient : ${details.join(', ')}. Veuillez d'abord supprimer ou réaffecter ces éléments.`,
+          `Impossible de supprimer ce magasin car ${store._count.users} utilisateur(s) y sont assignés`,
         );
       }
 
-      // Supprimer le magasin
+      // Vérifier qu'il n'a pas de stocks
+      if (store._count.stocks > 0) {
+        throw new ConflictException(
+          `Impossible de supprimer ce magasin car il contient ${store._count.stocks} stock(s)`,
+        );
+      }
+
+      // Vérifier qu'il n'a pas de ventes
+      if (store._count.sales > 0) {
+        throw new ConflictException(
+          `Impossible de supprimer ce magasin car il a ${store._count.sales} vente(s) associée(s)`,
+        );
+      }
+
       await this.prisma.store.delete({
         where: { id },
       });
@@ -466,18 +481,19 @@ export class StoreService {
     } catch (error) {
       if (
         error instanceof NotFoundException ||
-        error instanceof ConflictException
+        error instanceof ConflictException ||
+        error instanceof ForbiddenException
       ) {
         throw error;
       }
 
       console.error('Erreur lors de la suppression du magasin:', error);
       throw new BadRequestException(
-        error.message ||
         'Une erreur est survenue lors de la suppression du magasin',
       );
     }
   }
+
 
   /**
    * Récupérer tous les utilisateurs d'un magasin
@@ -662,98 +678,47 @@ export class StoreService {
   }
 
   /**
-   * Récupérer des statistiques sur les magasins
-   */
+  * Récupérer les statistiques des magasins
+  */
   async getStats() {
     try {
-      const [
-        totalStores,
-        activeStores,
-        inactiveStores,
-        storesWithUsers,
-        storesWithStocks,
-        topStores,
-      ] = await Promise.all([
-        // Total de magasins
-        this.prisma.store.count(),
-
-        // Magasins actifs
-        this.prisma.store.count({
-          where: {
-            isActive: true,
-          },
-        }),
-
-        // Magasins inactifs
-        this.prisma.store.count({
-          where: {
-            isActive: false,
-          },
-        }),
-
-        // Magasins avec au moins 1 utilisateur
-        this.prisma.store.count({
-          where: {
-            users: {
-              some: {},
-            },
-          },
-        }),
-
-        // Magasins avec au moins 1 stock
-        this.prisma.store.count({
-          where: {
-            stocks: {
-              some: {},
-            },
-          },
-        }),
-
-        // Top 5 magasins par nombre de ventes
-        this.prisma.store.findMany({
-          take: 5,
-          where: {
-            isActive: true,
-          },
-          orderBy: {
-            sales: {
-              _count: 'desc',
-            },
-          },
-          select: {
-            id: true,
-            name: true,
-            city: true,
-            _count: {
-              select: {
-                users: true,
-                stocks: true,
-                sales: true,
+      const [totalStores, activeStores, inactiveStores, storeStats] =
+        await Promise.all([
+          this.prisma.store.count(),
+          this.prisma.store.count({ where: { isActive: true } }),
+          this.prisma.store.count({ where: { isActive: false } }),
+          this.prisma.store.findMany({
+            select: {
+              id: true,
+              name: true,
+              city: true,
+              balance: true,
+              _count: {
+                select: {
+                  users: true,
+                  stocks: true,
+                  sales: true,
+                },
               },
             },
-          },
-        }),
-      ]);
+            orderBy: {
+              name: 'asc',
+            },
+          }),
+        ]);
 
       return {
         data: {
           totalStores,
           activeStores,
           inactiveStores,
-          storesWithUsers,
-          storesWithStocks,
-          storesWithoutUsers: totalStores - storesWithUsers,
-          storesWithoutStocks: totalStores - storesWithStocks,
-          topStores,
+          storeStats,
         },
         message: 'Statistiques des magasins récupérées',
         success: true,
       };
     } catch (error) {
-      console.error(
-        'Erreur lors de la récupération des statistiques:',
-        error,
-      );
+      console.error('Erreur lors de la récupération des statistiques:', error);
       throw new BadRequestException(
         'Une erreur est survenue lors de la récupération des statistiques',
       );

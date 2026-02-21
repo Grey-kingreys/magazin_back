@@ -3,6 +3,7 @@ import {
   NotFoundException,
   ConflictException,
   BadRequestException,
+  ForbiddenException,
 } from '@nestjs/common';
 import { PrismaService } from 'src/common/services/prisma.service';
 import { CreateSupplierDto } from './dto/create-supplier.dto';
@@ -101,14 +102,51 @@ export class SupplierService {
     limit = 50,
     search?: string,
     isActive?: boolean,
-    city?: string,
-    country?: string,
+    userId?: string,
+    userRole?: string,
   ) {
     try {
       const skip = (page - 1) * limit;
 
-      // Construction de la clause where
       const where: any = {};
+
+      // ⭐ FILTRAGE PAR RÔLE ET MAGASIN
+      if (userRole !== 'ADMIN' && userRole !== 'MANAGER') {
+        // Récupérer le magasin de l'utilisateur
+        const user = await this.prisma.user.findUnique({
+          where: { id: userId },
+          select: { storeId: true },
+        });
+
+        if (!user?.storeId) {
+          return {
+            data: {
+              suppliers: [],
+              pagination: {
+                total: 0,
+                page,
+                limit,
+                totalPages: 0,
+                hasMore: false,
+              },
+            },
+            message: 'Aucun magasin assigné à votre compte',
+            success: true,
+          };
+        }
+
+        // STORE_MANAGER et CASHIER voient uniquement les fournisseurs
+        // qui ont des produits en stock dans leur magasin
+        where.products = {
+          some: {
+            stocks: {
+              some: {
+                storeId: user.storeId,
+              },
+            },
+          },
+        };
+      }
 
       // Filtre de recherche
       if (search) {
@@ -131,37 +169,14 @@ export class SupplierService {
               mode: 'insensitive',
             },
           },
-          {
-            city: {
-              contains: search,
-              mode: 'insensitive',
-            },
-          },
         ];
       }
 
-      // Filtre par statut actif/inactif
+      // Filtre par statut
       if (isActive !== undefined) {
         where.isActive = isActive;
       }
 
-      // Filtre par ville
-      if (city) {
-        where.city = {
-          equals: city,
-          mode: 'insensitive',
-        };
-      }
-
-      // Filtre par pays
-      if (country) {
-        where.country = {
-          equals: country,
-          mode: 'insensitive',
-        };
-      }
-
-      // Récupération des fournisseurs avec comptage
       const [suppliers, total] = await Promise.all([
         this.prisma.supplier.findMany({
           where,
@@ -174,6 +189,7 @@ export class SupplierService {
             _count: {
               select: {
                 products: true,
+                purchases: true,
               },
             },
           },
@@ -205,31 +221,33 @@ export class SupplierService {
     }
   }
 
+
   /**
    * Récupérer un fournisseur par son ID
    */
-  async findOne(id: string) {
+  async findOne(id: string, userId?: string, userRole?: string) {
     try {
       const supplier = await this.prisma.supplier.findUnique({
         where: { id },
         include: {
-          _count: {
-            select: {
-              products: true,
+          products: {
+            include: {
+              category: {
+                select: {
+                  id: true,
+                  name: true,
+                },
+              },
+              _count: {
+                select: {
+                  stocks: true,
+                },
+              },
             },
           },
-          products: {
-            take: 10, // Limiter à 10 produits pour la vue détaillée
+          _count: {
             select: {
-              id: true,
-              name: true,
-              sku: true,
-              costPrice: true,
-              sellingPrice: true,
-              isActive: true,
-            },
-            orderBy: {
-              name: 'asc',
+              purchases: true,
             },
           },
         },
@@ -241,13 +259,51 @@ export class SupplierService {
         );
       }
 
+      // ⭐ VÉRIFICATION DES PERMISSIONS
+      if (userRole !== 'ADMIN' && userRole !== 'MANAGER') {
+        const user = await this.prisma.user.findUnique({
+          where: { id: userId },
+          select: { storeId: true },
+        });
+
+        if (!user?.storeId) {
+          throw new ForbiddenException('Aucun magasin assigné à votre compte');
+        }
+
+        // Vérifier que le fournisseur a des produits en stock dans le magasin de l'utilisateur
+        const hasProductsInUserStore = await this.prisma.product.findFirst({
+          where: {
+            supplierId: id,
+            stocks: {
+              some: {
+                storeId: user.storeId,
+              },
+            },
+          },
+        });
+
+        if (!hasProductsInUserStore) {
+          throw new ForbiddenException(
+            'Vous n\'avez pas la permission de consulter ce fournisseur',
+          );
+        }
+
+        // Filtrer les produits pour ne montrer que ceux en stock dans son magasin
+        supplier.products = supplier.products.filter((product) =>
+          product._count.stocks > 0
+        );
+      }
+
       return {
         data: supplier,
         message: 'Fournisseur trouvé',
         success: true,
       };
     } catch (error) {
-      if (error instanceof NotFoundException) {
+      if (
+        error instanceof NotFoundException ||
+        error instanceof ForbiddenException
+      ) {
         throw error;
       }
 
@@ -261,9 +317,13 @@ export class SupplierService {
   /**
    * Mettre à jour un fournisseur
    */
-  async update(id: string, updateSupplierDto: UpdateSupplierDto) {
+  async update(
+    id: string,
+    updateSupplierDto: UpdateSupplierDto,
+    userId: string,
+    userRole: string,
+  ) {
     try {
-      // Vérifier que le fournisseur existe
       const existingSupplier = await this.prisma.supplier.findUnique({
         where: { id },
       });
@@ -271,6 +331,40 @@ export class SupplierService {
       if (!existingSupplier) {
         throw new NotFoundException(
           `Fournisseur avec l'ID "${id}" non trouvé`,
+        );
+      }
+
+      // ⭐ VÉRIFICATION DES PERMISSIONS
+      if (userRole === 'STORE_MANAGER') {
+        const user = await this.prisma.user.findUnique({
+          where: { id: userId },
+          select: { storeId: true },
+        });
+
+        if (!user?.storeId) {
+          throw new ForbiddenException('Aucun magasin assigné à votre compte');
+        }
+
+        // Vérifier que le fournisseur a des produits en stock dans le magasin
+        const hasProductsInUserStore = await this.prisma.product.findFirst({
+          where: {
+            supplierId: id,
+            stocks: {
+              some: {
+                storeId: user.storeId,
+              },
+            },
+          },
+        });
+
+        if (!hasProductsInUserStore) {
+          throw new ForbiddenException(
+            'Vous ne pouvez modifier que les fournisseurs liés à votre magasin',
+          );
+        }
+      } else if (userRole === 'CASHIER') {
+        throw new ForbiddenException(
+          'Vous n\'avez pas la permission de modifier un fournisseur',
         );
       }
 
@@ -310,26 +404,25 @@ export class SupplierService {
         });
 
         if (supplierWithSameEmail) {
-          throw new ConflictException(`Cet email est déjà utilisé`);
+          throw new ConflictException(
+            `Un autre fournisseur avec l'email "${updateSupplierDto.email}" existe déjà`,
+          );
         }
       }
 
-      // Mettre à jour le fournisseur
       const updatedSupplier = await this.prisma.supplier.update({
         where: { id },
         data: {
           name: updateSupplierDto.name?.trim(),
-          email: updateSupplierDto.email?.trim().toLowerCase() || undefined,
           phone: updateSupplierDto.phone?.trim() || undefined,
+          email: updateSupplierDto.email?.trim().toLowerCase() || undefined,
           address: updateSupplierDto.address?.trim() || undefined,
-          city: updateSupplierDto.city?.trim() || undefined,
-          country: updateSupplierDto.country?.trim() || undefined,
-          taxId: updateSupplierDto.taxId?.trim() || undefined,
         },
         include: {
           _count: {
             select: {
               products: true,
+              purchases: true,
             },
           },
         },
@@ -343,7 +436,8 @@ export class SupplierService {
     } catch (error) {
       if (
         error instanceof NotFoundException ||
-        error instanceof ConflictException
+        error instanceof ConflictException ||
+        error instanceof ForbiddenException
       ) {
         throw error;
       }
@@ -359,8 +453,15 @@ export class SupplierService {
   /**
    * Activer/Désactiver un fournisseur
    */
-  async toggleActive(id: string) {
+  async toggleActive(id: string, userId: string, userRole: string) {
     try {
+      // ⭐ VÉRIFICATION: Seuls ADMIN et MANAGER peuvent activer/désactiver
+      if (userRole !== 'ADMIN' && userRole !== 'MANAGER') {
+        throw new ForbiddenException(
+          'Seuls les administrateurs et managers peuvent activer/désactiver un fournisseur',
+        );
+      }
+
       const supplier = await this.prisma.supplier.findUnique({
         where: { id },
       });
@@ -391,12 +492,15 @@ export class SupplierService {
         success: true,
       };
     } catch (error) {
-      if (error instanceof NotFoundException) {
+      if (
+        error instanceof NotFoundException ||
+        error instanceof ForbiddenException
+      ) {
         throw error;
       }
 
       console.error(
-        "Erreur lors du changement de statut du fournisseur:",
+        'Erreur lors du changement de statut du fournisseur:',
         error,
       );
       throw new BadRequestException(
@@ -408,15 +512,22 @@ export class SupplierService {
   /**
    * Supprimer un fournisseur (soft delete via isActive)
    */
-  async remove(id: string) {
+  async remove(id: string, userId: string, userRole: string) {
     try {
-      // Vérifier que le fournisseur existe
+      // ⭐ VÉRIFICATION DU RÔLE ADMIN
+      if (userRole !== 'ADMIN') {
+        throw new ForbiddenException(
+          'Seuls les administrateurs peuvent supprimer un fournisseur',
+        );
+      }
+
       const supplier = await this.prisma.supplier.findUnique({
         where: { id },
         include: {
           _count: {
             select: {
               products: true,
+              purchases: true,
             },
           },
         },
@@ -428,14 +539,20 @@ export class SupplierService {
         );
       }
 
-      // Vérifier qu'il n'a pas de produits actifs associés
+      // Vérifier qu'il n'a pas de produits associés
       if (supplier._count.products > 0) {
         throw new ConflictException(
-          `Impossible de supprimer ce fournisseur car il est associé à ${supplier._count.products} produit(s). Veuillez d'abord supprimer ou réaffecter les produits.`,
+          `Impossible de supprimer ce fournisseur car ${supplier._count.products} produit(s) lui sont associés`,
         );
       }
 
-      // Supprimer le fournisseur (suppression réelle car pas de produits)
+      // Vérifier qu'il n'a pas d'achats
+      if (supplier._count.purchases > 0) {
+        throw new ConflictException(
+          `Impossible de supprimer ce fournisseur car il a ${supplier._count.purchases} achat(s) associé(s)`,
+        );
+      }
+
       await this.prisma.supplier.delete({
         where: { id },
       });
@@ -448,14 +565,14 @@ export class SupplierService {
     } catch (error) {
       if (
         error instanceof NotFoundException ||
-        error instanceof ConflictException
+        error instanceof ConflictException ||
+        error instanceof ForbiddenException
       ) {
         throw error;
       }
 
       console.error('Erreur lors de la suppression du fournisseur:', error);
       throw new BadRequestException(
-        error.message ||
         'Une erreur est survenue lors de la suppression du fournisseur',
       );
     }

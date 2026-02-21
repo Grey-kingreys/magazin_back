@@ -464,10 +464,10 @@ export class CashRegisterService {
     }
   }
 
-  // ... (les autres méthodes restent inchangées: findAll, findOne, findOpenByUser, getStats, remove)
-
   /**
-   * Récupérer toutes les caisses avec pagination et filtres
+   * ⭐ MODIFIÉ: Récupérer toutes les caisses avec filtrage par rôle
+   * - ADMIN et MANAGER: voient toutes les caisses
+   * - STORE_MANAGER et CASHIER: voient uniquement leurs propres caisses
    */
   async findAll(
     page = 1,
@@ -476,11 +476,19 @@ export class CashRegisterService {
     status?: 'OPEN' | 'CLOSED',
     startDate?: Date,
     endDate?: Date,
+    userId?: string,
+    userRole?: string,
   ) {
     try {
       const skip = (page - 1) * limit;
 
       const where: any = {};
+
+      // ⭐ Filtrage par rôle
+      if (userRole !== 'ADMIN' && userRole !== 'MANAGER') {
+        // Les STORE_MANAGER et CASHIER ne voient que leurs propres caisses
+        where.userId = userId;
+      }
 
       if (storeId) {
         where.storeId = storeId;
@@ -514,7 +522,7 @@ export class CashRegisterService {
                 id: true,
                 name: true,
                 city: true,
-                users : true
+                users: true
               },
             },
             user: {
@@ -559,9 +567,9 @@ export class CashRegisterService {
   }
 
   /**
-   * Récupérer une caisse par ID
+   * ⭐ MODIFIÉ: Récupérer une caisse par ID avec vérification de permission
    */
-  async findOne(id: string) {
+  async findOne(id: string, userId?: string, userRole?: string) {
     try {
       const cashRegister = await this.prisma.cashRegister.findUnique({
         where: { id },
@@ -603,6 +611,16 @@ export class CashRegisterService {
         );
       }
 
+      // ⭐ Vérification des permissions
+      if (userRole !== 'ADMIN' && userRole !== 'MANAGER') {
+        // STORE_MANAGER et CASHIER ne peuvent voir que leurs propres caisses
+        if (cashRegister.userId !== userId) {
+          throw new ForbiddenException(
+            'Vous n\'avez pas la permission de consulter cette caisse',
+          );
+        }
+      }
+
       const completedSales = cashRegister.sales.filter(
         (sale) => sale.status === 'COMPLETED',
       );
@@ -625,7 +643,7 @@ export class CashRegisterService {
         success: true,
       };
     } catch (error) {
-      if (error instanceof NotFoundException) {
+      if (error instanceof NotFoundException || error instanceof ForbiddenException) {
         throw error;
       }
 
@@ -811,10 +829,18 @@ export class CashRegisterService {
   }
 
   /**
-   * Supprimer une caisse (seulement si elle n'a aucune vente)
+   * ⭐ MODIFIÉ: Supprimer une caisse (ADMIN uniquement)
+   * Vérification du rôle côté service pour plus de sécurité
    */
-  async remove(id: string) {
+  async remove(id: string, userId: string, userRole: string) {
     try {
+      // ⭐ VÉRIFICATION DU RÔLE ADMIN
+      if (userRole !== 'ADMIN') {
+        throw new ForbiddenException(
+          'Seuls les administrateurs peuvent supprimer une caisse',
+        );
+      }
+
       const cashRegister = await this.prisma.cashRegister.findUnique({
         where: { id },
         include: {
@@ -850,7 +876,8 @@ export class CashRegisterService {
     } catch (error) {
       if (
         error instanceof NotFoundException ||
-        error instanceof ConflictException
+        error instanceof ConflictException ||
+        error instanceof ForbiddenException  // ⭐ Ajout de ForbiddenException
       ) {
         throw error;
       }

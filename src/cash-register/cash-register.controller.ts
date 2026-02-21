@@ -139,13 +139,14 @@ export class CashRegisterController {
     return this.cashRegisterService.update(id, updateCashRegisterDto, request.user.userId);
   }
 
-  // Les autres routes restent identiques...
-
+  /**
+   * ⭐ MODIFIÉ: Liste des caisses avec filtrage par rôle
+   */
   @Get()
-  @Roles('ADMIN', 'MANAGER', 'STORE_MANAGER')
+  @Roles('ADMIN', 'MANAGER', 'STORE_MANAGER', 'CASHIER')
   @ApiOperation({
     summary: 'Liste des caisses',
-    description: 'Récupère la liste de toutes les caisses avec pagination et filtres',
+    description: 'Récupère la liste des caisses avec pagination et filtres. ADMIN et MANAGER voient toutes les caisses, les autres utilisateurs ne voient que leurs propres caisses.',
   })
   @ApiQuery({ name: 'page', required: false, example: 1 })
   @ApiQuery({ name: 'limit', required: false, example: 50 })
@@ -160,11 +161,21 @@ export class CashRegisterController {
     @Query('status') status?: 'OPEN' | 'CLOSED',
     @Query('startDate') startDate?: string,
     @Query('endDate') endDate?: string,
+    @Req() request?: RequestWithUser,
   ) {
     const start = startDate ? new Date(startDate) : undefined;
     const end = endDate ? new Date(endDate) : undefined;
 
-    return this.cashRegisterService.findAll(page, limit, storeId, status, start, end);
+    return this.cashRegisterService.findAll(
+      page,
+      limit,
+      storeId,
+      status,
+      start,
+      end,
+      request?.user?.userId,
+      request?.user?.role,
+    );
   }
 
   @Get('stats')
@@ -197,25 +208,41 @@ export class CashRegisterController {
     return this.cashRegisterService.findOpenByUser(request.user.userId);
   }
 
+  /**
+   * ⭐ MODIFIÉ: Détails d'une caisse avec vérification de permission
+   */
   @Get(':id')
   @Roles('ADMIN', 'MANAGER', 'STORE_MANAGER', 'CASHIER')
   @ApiOperation({
     summary: "Détails d'une caisse",
-    description: "Récupère les détails d'une caisse spécifique",
+    description: "Récupère les détails d'une caisse spécifique. Seuls ADMIN, MANAGER et le propriétaire de la caisse peuvent la consulter.",
   })
   @ApiParam({ name: 'id', description: 'ID de la caisse' })
-  findOne(@Param('id') id: string) {
-    return this.cashRegisterService.findOne(id);
+  findOne(
+    @Param('id') id: string,
+    @Req() request: RequestWithUser,
+  ) {
+    return this.cashRegisterService.findOne(id, request.user.userId, request.user.role);
   }
 
+  /**
+   * Supprimer une caisse
+   */
   @Delete(':id')
-  @Roles('ADMIN')
+  @Roles('ADMIN')  // ⭐ Garde existant (première couche de sécurité)
   @ApiOperation({
     summary: 'Supprimer une caisse',
     description: 'Supprime une caisse (uniquement si aucune vente associée)',
   })
   @ApiParam({ name: 'id', description: 'ID de la caisse' })
-  remove(@Param('id') id: string) {
-    return this.cashRegisterService.remove(id);
+  remove(
+    @Param('id') id: string,
+    @Req() request: RequestWithUser,  // ⭐ Ajout du request
+  ) {
+    return this.cashRegisterService.remove(
+      id,
+      request.user.userId,    // ⭐ Transmission userId
+      request.user.role       // ⭐ Transmission role
+    );
   }
 }

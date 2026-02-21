@@ -10,6 +10,7 @@ import {
   Query,
   ParseIntPipe,
   DefaultValuePipe,
+  Req,
 } from '@nestjs/common';
 import {
   ApiTags,
@@ -25,6 +26,7 @@ import { UpdateSupplierDto } from './dto/update-supplier.dto';
 import { AuthGuard } from 'src/common/guards/auth.guard';
 import { RolesGuard } from 'src/common/guards/roles.guard';
 import { Roles } from 'src/common/decorators/roles.decorator';
+import { RequestWithUser } from 'src/auth/jwt.strategy';
 
 @ApiTags('Fournisseurs')
 @Controller('supplier')
@@ -222,10 +224,11 @@ export class SupplierController {
    * Récupérer un fournisseur par ID
    */
   @Get(':id')
-  @Roles('ADMIN', 'MANAGER', 'STORE_MANAGER')
+  @Roles('ADMIN', 'MANAGER', 'STORE_MANAGER', 'CASHIER')
   @ApiOperation({
-    summary: "Détails d'un fournisseur",
-    description: "Récupère les détails d'un fournisseur spécifique",
+    summary: 'Détails d\'un fournisseur',
+    description:
+      'Récupère les détails d\'un fournisseur spécifique. STORE_MANAGER et CASHIER ne peuvent consulter que les fournisseurs ayant des produits en stock dans leur magasin.',
   })
   @ApiParam({
     name: 'id',
@@ -248,8 +251,12 @@ export class SupplierController {
     status: 404,
     description: 'Fournisseur non trouvé',
   })
-  findOne(@Param('id') id: string) {
-    return this.supplierService.findOne(id);
+  findOne(@Param('id') id: string, @Req() request: RequestWithUser) {
+    return this.supplierService.findOne(
+      id,
+      request.user.userId,
+      request.user.role,
+    );
   }
 
   /**
@@ -306,10 +313,11 @@ export class SupplierController {
    * Mettre à jour un fournisseur
    */
   @Patch(':id')
-  @Roles('ADMIN', 'MANAGER')
+  @Roles('ADMIN', 'MANAGER', 'STORE_MANAGER')
   @ApiOperation({
     summary: 'Modifier un fournisseur',
-    description: "Met à jour les informations d'un fournisseur",
+    description:
+      'Met à jour les informations d\'un fournisseur. ADMIN et MANAGER peuvent modifier tous les fournisseurs, STORE_MANAGER ne peut modifier que les fournisseurs ayant des produits dans son magasin.',
   })
   @ApiParam({
     name: 'id',
@@ -343,8 +351,14 @@ export class SupplierController {
   update(
     @Param('id') id: string,
     @Body() updateSupplierDto: UpdateSupplierDto,
+    @Req() request: RequestWithUser,
   ) {
-    return this.supplierService.update(id, updateSupplierDto);
+    return this.supplierService.update(
+      id,
+      updateSupplierDto,
+      request.user.userId,
+      request.user.role,
+    );
   }
 
   /**
@@ -377,8 +391,12 @@ export class SupplierController {
     status: 404,
     description: 'Fournisseur non trouvé',
   })
-  toggleActive(@Param('id') id: string) {
-    return this.supplierService.toggleActive(id);
+  toggleActive(@Param('id') id: string, @Req() request: RequestWithUser) {
+    return this.supplierService.toggleActive(
+      id,
+      request.user.userId,
+      request.user.role,
+    );
   }
 
   /**
@@ -416,7 +434,11 @@ export class SupplierController {
     status: 409,
     description: 'Impossible de supprimer un fournisseur avec des produits',
   })
-  remove(@Param('id') id: string) {
-    return this.supplierService.remove(id);
+  remove(@Param('id') id: string, @Req() request: RequestWithUser) {
+    return this.supplierService.remove(
+      id,
+      request.user.userId,
+      request.user.role,
+    );
   }
 }
